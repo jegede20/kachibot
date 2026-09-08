@@ -17,7 +17,7 @@ import {
   keypairFromSecret, keypairToSecret, parsePrivateKey,
 } from './crypto';
 import { solShort, sol, pctSigned, ago, scorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
-import { PUMPFUN_URL_RE, WALLET_ADDR_RE, TELEGRAM_ALLOWED_USER_IDS } from './config';
+import { PUMPFUN_URL_RE, WALLET_ADDR_RE, TELEGRAM_ALLOWED_USER_IDS, PUBLIC_URL } from './config';
 import { fetchCurve, isLiveCurve } from './chain/pump';
 import crypto from 'node:crypto';
 
@@ -166,6 +166,12 @@ export class KachiBot {
       await this.showMain(ctx);
     });
     this.bot.help(async (ctx) => { await ctx.reply(helpIntro(), HTML); });
+    this.bot.command('guide', async (ctx) => {
+      await ctx.reply(
+        `📖 <b>USER GUIDE</b> — plain-language manual for everything KACHIBOT does.\n\nSetup, wallets, send &amp; receive, import/export, every setting, every command:\n\n${PUBLIC_URL}/guide`,
+        HTML,
+      );
+    });
     this.bot.command(['menu', 'main'], async (ctx) => this.showMain(ctx));
     this.bot.command('settings', async (ctx) => this.showSettings(ctx));
     this.bot.command('wallet', async (ctx) => this.showWallet(ctx));
@@ -324,7 +330,7 @@ export class KachiBot {
       `💼 <b>WALLET</b> — ${w.label}${doc.wallets.length > 1 ? ` <i>(${doc.wallets.findIndex((x) => x.id === w.id) + 1}/${doc.wallets.length})</i>` : ''}`,
       `SOL balance: <b>${balShown}</b>`,
       '',
-      addr ? `<code>${addr}</code>` : '',
+      addr ? `Address: <code>${addr}</code>` : '',
       '',
       addr ? '💸 send SOL here — snipes spend from it. Tap ⟳ to refresh after a deposit.' : 'Choose an action below.',
     ].join('\n');
@@ -343,7 +349,7 @@ export class KachiBot {
                 `💼 <b>WALLET</b> — ${w.label}${doc.wallets.length > 1 ? ` <i>(${doc.wallets.findIndex((x) => x.id === w.id) + 1}/${doc.wallets.length})</i>` : ''}`,
                 `SOL balance: <b>${solShort(b)}</b>`,
                 '',
-                `<code>${pkStr}</code>`,
+                `Address: <code>${pkStr}</code>`,
                 '',
                 '💸 send SOL here — snipes spend from it. Tap ⟳ to refresh after a deposit.',
               ].join('\n'),
@@ -363,7 +369,7 @@ export class KachiBot {
       '📥 Send your <b>12/24-word seed phrase</b> or <b>private key</b> (base58, hex or 64-byte JSON array).\n\nIt is added as a <b>new wallet</b> and activated. Encrypted instantly — never stored in plaintext. /cancel to abort.');
   }
 
-  private async runImport(userId: number, text: string): Promise<{ ok: boolean; message: string }> {
+  private async runImport(userId: number, text: string): Promise<{ ok: boolean; message: string; address: string; label: string }> {
     const words = text.trim().split(/\s+/);
     let kp: ReturnType<typeof keypairFromMnemonic>;
     let phrase: string | null = null;
@@ -377,7 +383,7 @@ export class KachiBot {
     const rec = this.addWalletRecord(doc, { secret: encryptSecret(keypairToSecret(kp)), mnemonic: phrase ? encryptSecret(phrase) : null });
     await this.saveDoc(doc);
     await getStore().flush(); // wallet secrets must survive a crash — write now
-    return { ok: true, message: `${kp.publicKey.toBase58()} (${rec.label})` };
+    return { ok: true, message: 'ok', address: kp.publicKey.toBase58(), label: rec.label };
   }
 
   private async doSend(
@@ -488,7 +494,7 @@ export class KachiBot {
     await this.saveDoc(doc);
     await watcher.addTargetForUser(userId);
     await ctx.reply(
-      `✅ <b>NOW WATCHING</b>\n<code>${address}</code>\n\nLabel: ${doc.watched[doc.watched.length - 1].label}\nEvery buy gets mirrored per your /settings.`,
+      `✅ <b>NOW WATCHING</b>\n\nAddress: <code>${address}</code>\nLabel: ${doc.watched[doc.watched.length - 1].label}\nEvery buy gets mirrored per your /settings.`,
       HTML,
     );
     await this.showWatch(ctx);
@@ -510,7 +516,7 @@ export class KachiBot {
       : '\n📊 no closed copies yet — stats fill in as you mirror this wallet';
     const text = [
       `👁 <b>${escTag(w.label)}</b>`,
-      `<code>${w.address}</code>`,
+      `Address: <code>${w.address}</code>`,
       w.source === 'pumpfun' ? 'source: pump.fun link' : '',
       `added ${ago(w.addedAt)} · ${w.paused ? '⏸ paused' : 'live'}`,
       perf,
@@ -709,7 +715,7 @@ export class KachiBot {
       const addr = kp.kp.publicKey.toBase58();
       await this.cbText(ctx, ' ');
       await this.answer(ctx,
-        `📥 <b>RECEIVE</b> — ${this.activeWallet(doc)?.label}\n\n<code>${addr}</code>\n\nSend SOL (any SPL token works for token accounts) to this address.\n\nExplorer: https://solscan.io/account/${addr}`,
+        `📥 <b>RECEIVE</b> — ${this.activeWallet(doc)?.label}\n\nAddress: <code>${addr}</code>\n\nSend SOL (any SPL token works for token accounts) to this address.\n\nExplorer: https://solscan.io/account/${addr}`,
         { kb: this.kb([[B('🔙 Wallet', 'm:wallet')]]) });
     });
     on('w:send', async (ctx) => {
@@ -918,7 +924,7 @@ export class KachiBot {
         if (stage.expect === 'import_input') {
           try {
             const r = await this.runImport(userId, text);
-            await ctx.reply(`✅ <b>WALLET IMPORTED &amp; ACTIVE</b>\n\n<code>${r.message}</code>\n\nStored encrypted (AES-256-GCM). Copy-trades now spend from this wallet.`, HTML);
+            await ctx.reply(`✅ <b>WALLET IMPORTED &amp; ACTIVE</b> — ${escTag(r.label)}\n\nAddress: <code>${r.address}</code>\n\nStored encrypted (AES-256-GCM). Copy-trades now spend from this wallet.`, HTML);
           } catch (e) {
             await ctx.reply(`❌ import failed: ${(e as Error).message}`, HTML);
             this.pending.set(userId, stage);
@@ -1010,7 +1016,7 @@ export class KachiBot {
           if (phraseMsgId && ctx.chat?.id) {
             await ctx.telegram.deleteMessage(ctx.chat.id, phraseMsgId).catch(() => undefined);
           }
-          await ctx.reply(`✅ <b>WALLET CREATED</b> — ${w.label}\n\n<code>${kp.publicKey.toBase58()}</code>\n\nSOL balance: ◎0 — send SOL to this address to fund snipes.`, {
+          await ctx.reply(`✅ <b>WALLET CREATED</b> — ${w.label}\n\nAddress: <code>${kp.publicKey.toBase58()}</code>\n\nSOL balance: ◎0 — send SOL to this address to fund snipes.`, {
             ...HTML,
             reply_markup: Markup.inlineKeyboard([[Markup.button.callback('💼 View wallet', 'm:wallet')]]).reply_markup,
           });

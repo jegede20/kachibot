@@ -4,6 +4,8 @@
  * then parks. Handles SIGINT/SIGTERM gracefully.
  */
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { PORT as PORT_NUM } from './config';
 import { assertConfig, TELEGRAM_BOT_TOKEN } from './config';
 import { getStore } from './db';
@@ -33,7 +35,19 @@ async function main(): Promise<void> {
 
   // 6) keep-alive health endpoint: hosts like Render need an HTTP listener,
   //    and UptimeRobot pings it every 5 min so the free instance never sleeps.
+  // user manual (plain markdown) served at /guide for humans on the web
+  const guidePath = [path.join(process.cwd(), 'USER-GUIDE.md'), path.join(__dirname, '..', 'USER-GUIDE.md')]
+    .find((p) => { try { return fs.existsSync(p); } catch { return false; } });
+  const guide = guidePath ? fs.readFileSync(guidePath, 'utf8') : null;
+
   const health = http.createServer((req, res) => {
+    const url = (req.url || '/').split('?')[0];
+    if (url === '/guide') {
+      if (guide === null) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('guide file not found'); return; }
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(guide);
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, service: 'kachibot', ts: Date.now() }));
   });

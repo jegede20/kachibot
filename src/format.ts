@@ -196,6 +196,7 @@ export function helpIntro(): string {
   lines.push(`3) /settings tunes size, slippage, TP/SL, fee caps`);
   lines.push(`4) /wallet deposits your ammo (in-bot wallet)`);
   lines.push(`5) sit back — every ape prints a branded trade card`);
+  lines.push(`6) /guide — full manual: wallets, send/receive, every setting, all commands`);
   lines.push(T);
   lines.push('All settings live in Telegram. No web app. No fees — ever.');
   return lines.join('\n');

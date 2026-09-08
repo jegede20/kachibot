@@ -41,6 +41,8 @@ export const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABAS
 export const DATA_DIR = process.env.KACHI_DATA_DIR || './data';
 /** HTTP port for the keep-alive/health endpoint (Render injects PORT) */
 export const PORT = process.env.PORT ? Number(process.env.PORT) : 0;
+/** Public base URL — /guide is served here so users can read the manual */
+export const PUBLIC_URL = process.env.PUBLIC_URL || 'https://kachibot.onrender.com';
 export const DB_FILE = process.env.KACHI_DB_FILE || `${DATA_DIR}/db.json`;
 
 /** Jito block-engine (only used on mainnet when a user's fee cap > 0). */
