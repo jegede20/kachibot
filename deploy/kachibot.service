@@ -1,0 +1,17 @@
+[Unit]
+Description=KACHIBOT — Solana copy-sniper Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kachibot
+ExecStart=/usr/bin/node /opt/kachibot/dist/index.js
+Restart=always
+RestartSec=3
+# harden a bit
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+# KACHIBOT — Render blueprint (optional; UI deploy also works)
+services:
+  - type: web
+    name: kachibot
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install && npm run build
+    startCommand: node dist/index.js
+    healthCheckPath: /
+    envVars:
+      - key: SOLANA_NETWORK
+        value: mainnet
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: RPC_HTTP_URL
+        sync: false
+      - key: RPC_WS_URL
+        sync: false
+      - key: HELIUS_DAS_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
