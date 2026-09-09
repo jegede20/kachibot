@@ -630,7 +630,7 @@ export class KachiBot {
     const t = (label: string, on: boolean, key: keyof typeof a): { label: string; data: string } =>
       B(`${label} ${on ? '✅' : '⬜'}`, `a:${key}`);
     await this.answer(ctx,
-      '🔔 <b>ALERTS</b>\n\nEvery snipe alert carries token name, entry mcap, chart link and inline 💸 sell buttons. Pick what reaches you:',
+      '🔔 <b>ALERTS</b>\n\nWhat the bot messages you about:\n🎯 <b>snipes</b> — copy-buy outcome cards (locked / failed / dodged). Off = it buys silently.\n💸 <b>sells</b> — TP step sells and closed-trade scorecards. Off = exits close quietly.\n👁 <b>activity</b> — radar notes on wallets you watch (noisy).\nProtection warnings (blocks, rug sweeps, caps) always reach you.',
       {
         kb: this.kb([
           row(t('🎯 snipes', a.snipes, 'snipes'), t('💸 sells', a.sells, 'sells')),

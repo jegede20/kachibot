@@ -161,7 +161,7 @@ A watched wallet only triggers buys while it's **live** (not paused) and only if
 |---|---|---|
 | **📡 Positions** | `/positions` or Main → 📡 Positions | Every trade still open: token, SOL in, live value, multiple (e.g. 1.43x), age. Buttons: **💸 sell** (close one now), **📡 card** (details), **🧯 Panic sell-all**. |
 | **📖 History** | `/history` or Main → 📖 History | All trades: closed (green/red with profit), open, and failed. Running PnL, win rate, average return. Every closed trade has a **🏆 card** button. |
-| **🔔 Alerts** | Main → 🔔 Alerts | What messages the bot sends you: **🎯 snipes** (a copy-buy happened), **💸 sells** (a position was sold), **👁 watched activity** (noisy — off by default). Each is a simple on/off toggle. |
+| **🔔 Alerts** | Main → 🔔 Alerts | What messages the bot sends: **🎯 snipes** = copy-buy outcome cards (locked / failed / dodged) — off means it buys silently; **💸 sells** = TP-step sells and closed-trade scorecards; **👁 activity** = radar notes on wallets you watch (off by default). Protection warnings (blocks, rug sweeps, caps) always reach you. Each is a simple on/off toggle. |
 | **🧯 Panic sell-all** | Main → 🧯 Panic | Dumps *every* open position right now. Asks for your PIN (or a `yes` if no PIN is set). Use it when you want out of everything instantly. |
 
 A **failed** buy stays in History with the reason — common ones:

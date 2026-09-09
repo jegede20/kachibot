@@ -66,6 +66,10 @@ async function warnNoWallet(userId: number, reason: string): Promise<void> {
   await notifyUser(userId, `⚠️ <b>${reason}</b>\n\nHead to /wallet — generate or import one, then snipes go live.`);
 }
 
+function escTag(x: string): string {
+  return x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 function computeBudget(s: UserDoc['settings'], watchedSpend: number | null): number {
   let budget: number;
   if (s.buyMode === 'pct' && watchedSpend !== null && watchedSpend > 0) {
@@ -139,7 +143,7 @@ export class Trader {
       const need = (budget + s.maxFeeLamports + 2_000_000) / 1e9;
       await notifyUser(
         doc.userId,
-        `⛔ <b>SNIPE BLOCKED</b> — ${ev.watchedLabel} aped $${ev.mint.slice(0, 6)}… but your wallet holds ${have.toFixed(4)}◎.\nNeed ≈ ${need.toFixed(4)}◎ (buy + priority fee + buffer) to mirror. Refill at /wallet — the next ape gets copied.`,
+        `⛔ <b>SNIPE BLOCKED</b> — ${escTag(ev.watchedLabel)} aped $${ev.mint.slice(0, 6)}… but your wallet holds ${have.toFixed(4)} SOL.\n\nNeed ≈ ${need.toFixed(4)} SOL to mirror it (buy + priority fee + buffer). Refill at /wallet — the next ape gets copied.`,
       );
       return;
     }
@@ -297,14 +301,19 @@ export class Trader {
       row.walletBalanceAfter = await conn.getBalance(wallet.publicKey, 'confirmed').catch(() => null);
       await this.store.putTrade(row).catch(() => undefined);
       const dodged = e instanceof DodgedError;
-      await notifyUser(
-        doc.userId,
-        `${dodged ? '🛡️ <b>SNIPE DODGED</b>' : '⛔ <b>SNIPE FAILED</b>'} — $${row.symbol}: ${err.message}${dodged ? '' : ' (failed row kept in history)'}`,
-      );
+      const al = await this.store.getUser(doc.userId).catch(() => null);
+      if (al?.settings.alerts.snipes) {
+        await notifyUser(
+          doc.userId,
+          `${dodged ? '🛡️ <b>SNIPE DODGED</b>' : '⛔ <b>SNIPE FAILED</b>'} — $${row.symbol}: ${err.message}${dodged ? '' : ' (failed row kept in history)'}`,
+        );
+      }
     }
   }
 
   private async notifySnipe(row: TradeRow): Promise<void> {
+    const u = await this.store.getUser(row.userId).catch(() => null);
+    if (!u || !u.settings.alerts.snipes) return; // 🎯 snipes OFF → successful buys stay silent
     const tp = row.settingsAtEntry.tpMultiples.map((m) => `${m}x`).join('/');
     const lines = [
       `🎯 <b>SNIPE LOCKED</b> — ${row.name} <b>$${row.symbol}</b>`,
@@ -391,7 +400,9 @@ export class Trader {
       await this.closeRowIfDone(row);
       if (this.isFullyOut(row)) return;
       const net = proceeds - Number(sellTokens) * row.entryPriceLamports;
-      await notifyUser(userId, `🎯 <b>TP ${targetMultiple.toFixed(1)}x</b> — $${row.symbol} step: ${(proceeds / 1e9).toFixed(5)}◎ out (${net >= 0 ? '+' : ''}${(net / 1e9).toFixed(5)}◎) — position still open`);
+      if (doc.settings.alerts.sells) {
+        await notifyUser(userId, `🎯 <b>TP ${targetMultiple.toFixed(1)}x</b> — $${row.symbol} step: ${(proceeds / 1e9).toFixed(5)}◎ out (${net >= 0 ? '+' : ''}${(net / 1e9).toFixed(5)}◎) — position still open`);
+      }
     } catch (e) {
       const msg = (e as Error).message;
       row.error = `TP step failed: ${msg}`;
@@ -503,15 +514,20 @@ export class Trader {
       : null;
     await store.putTrade(row);
 
-    // scorecard + running PnL
+    // scorecard + running PnL. 💸 sells alerts OFF → automatic exits (TP / SL /
+    // copy-sell) close quietly; manual sells & panic always confirm with a card.
     const all = await store.listTrades(row.userId);
     const closed = all.filter((t) => t.status === 'closed');
     const running = closed.reduce((a, t) => a + (t.pnlLamports ?? 0), 0);
-    await notifyUser(row.userId, scorecardText(row, closed.length, running), {
-      buttons: [
-        [['📖 History', `hist:${row.userId}`], ['💸 Panic sell-all', `panic:${row.userId}`]],
-      ],
-    });
+    const reason = row.exitReason ?? 'MANUAL';
+    const quiet = !doc.settings.alerts.sells && ['TP', 'SL', 'COPY_SELL'].includes(reason);
+    if (!quiet) {
+      await notifyUser(row.userId, scorecardText(row, closed.length, running), {
+        buttons: [
+          [['📖 History', `hist:${row.userId}`], ['💸 Panic sell-all', `panic:${row.userId}`]],
+        ],
+      });
+    }
     return true;
   }
 
