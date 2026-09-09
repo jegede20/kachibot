@@ -135,7 +135,12 @@ export class Trader {
 
     const bal = await conn.getBalance(wallet.publicKey, 'confirmed').catch(() => -1);
     if (bal < budget + s.maxFeeLamports + 2_000_000) {
-      await notifyUser(doc.userId, `⛔ <b>SNIPE BLOCKED</b> — need ≈ ${((budget + s.maxFeeLamports + 2_000_000) / 1e9).toFixed(4)}◎ (have ${Math.max(0, bal) / 1e9}◎).\nRefill at /wallet — the next ape gets copied.`);
+      const have = Math.max(0, bal) / 1e9;
+      const need = (budget + s.maxFeeLamports + 2_000_000) / 1e9;
+      await notifyUser(
+        doc.userId,
+        `⛔ <b>SNIPE BLOCKED</b> — ${ev.watchedLabel} aped $${ev.mint.slice(0, 6)}… but your wallet holds ${have.toFixed(4)}◎.\nNeed ≈ ${need.toFixed(4)}◎ (buy + priority fee + buffer) to mirror. Refill at /wallet — the next ape gets copied.`,
+      );
       return;
     }
 

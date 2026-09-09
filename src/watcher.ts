@@ -318,6 +318,9 @@ class Watcher {
     }
     if (!subscribers.length) return;
 
+    // estimateSpend hits RPC; two users watching the same wallet shouldn't
+    // each pay for the same coin twice in one tx
+    const spendEstCache = new Map<string, number | null>();
     for (const ev of events) {
       const now = Date.now();
       for (const sub of subscribers) {
@@ -335,13 +338,14 @@ class Watcher {
           }
         }
 
+        // The spend estimate powers %-mode sizing AND the min/max spend
+        // filters, so it must run on every buy regardless of whether the
+        // RADAR alert happens to be enabled (it is off by default).
         let spend: number | null = null;
-        if (ev.side === 'buy' && settings.alerts.activity) {
-          if (ev.tokenDeltaRaw !== null && settings.buyMode === 'pct') {
-            spend = await this.estimateSpend(ev.mint, ev.tokenDeltaRaw);
-          } else if (ev.tokenDeltaRaw !== null) {
-            spend = await this.estimateSpend(ev.mint, ev.tokenDeltaRaw);
-          }
+        if (ev.side === 'buy' && ev.tokenDeltaRaw !== null) {
+          const ck = `${ev.mint}:${ev.tokenDeltaRaw}`;
+          if (!spendEstCache.has(ck)) spendEstCache.set(ck, await this.estimateSpend(ev.mint, ev.tokenDeltaRaw));
+          spend = spendEstCache.get(ck) ?? null;
         }
 
         if (ev.side === 'buy' && settings.alerts.activity) {
