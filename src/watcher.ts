@@ -29,6 +29,8 @@ class Watcher {
   private targets = new Map<string, Set<string>>();
   /** address -> { wsId } when subscribed */
   private wsByAddress = new Map<string, number>();
+  /** address -> next allowed resubscribe attempt (ms) — subscription self-heal */
+  private subRetryAt = new Map<string, number>();
   /** address -> Set of processed tx signatures */
   private processed = new Map<string, Set<string>>();
   /** signature -> lastSeen (ms) for dedupe while processing */
@@ -73,10 +75,14 @@ class Watcher {
     this.targets.set(w.address, set);
   }
 
-  async removeTargetForUser(userId: number): Promise<void> {
+  /** remove one specific watch (watchId) — or all of the user's watches when omitted */
+  async removeTargetForUser(userId: number, watchId?: string): Promise<void> {
     for (const [address, set] of this.targets) {
       for (const key of [...set]) {
-        if (key.startsWith(`${userId}:`)) set.delete(key);
+        const remove = watchId
+          ? key === `${userId}:${watchId}`
+          : key.startsWith(`${userId}:`);
+        if (remove) set.delete(key);
       }
       if (set.size === 0) this.targets.delete(address);
     }
@@ -105,8 +111,21 @@ class Watcher {
         void this.poll(address, false);
       }, 'confirmed');
       this.wsByAddress.set(address, wsId);
+      // Prime: mark the wallet's existing recent txs as already-seen so a new
+      // watch starts copying from NOW, not from its last few old buys.
+      void this.prime(address);
     } catch (e) {
       console.error(`[watcher] account subscription failed for ${address}:`, (e as Error).message);
+    }
+  }
+
+  /** mark the most recent signatures as processed WITHOUT analyzing them */
+  private async prime(address: string): Promise<void> {
+    try {
+      const sigs = await this.conn.getSignaturesForAddress(new PublicKey(address), { limit: 8 }, 'confirmed');
+      for (const sg of sigs || []) this.markProcessed(address, sg.signature);
+    } catch {
+      // best effort — the account-change stream + backstop still cover live buys
     }
   }
 
@@ -116,7 +135,8 @@ class Watcher {
       try { await this.conn.removeAccountChangeListener(wsId); } catch { /* ignore */ }
       this.wsByAddress.delete(address);
     }
-    this.processed.delete(address);
+    // NB: keep the processed-signature history — wiping it would let a resumed
+    // or re-added watch replay OLD buys and copy them at today's price.
   }
 
   /**
@@ -125,8 +145,16 @@ class Watcher {
    */
   startBackstop(intervalMs = 7000): void {
     const tick = (): void => {
+      const now = Date.now();
       for (const address of this.wsByAddress.keys()) {
         void this.poll(address, true);
+      }
+      // self-heal: if a subscription failed or died, resubscribe (throttled)
+      for (const address of this.targets.keys()) {
+        if (this.wsByAddress.has(address)) continue;
+        if (now - (this.subRetryAt.get(address) || 0) < 30_000) continue;
+        this.subRetryAt.set(address, now);
+        void this.subscribe(address);
       }
     };
     const t = setInterval(tick, intervalMs);

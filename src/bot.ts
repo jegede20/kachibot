@@ -838,19 +838,27 @@ export class KachiBot {
       const doc = await this.docFor(this.uid(ctx));
       const w = doc.watched.find((x) => x.id === watchId);
       if (!w) return;
-      if (action === 'pause') w.paused = !w.paused;
       if (action === 'remove') {
         doc.watched = doc.watched.filter((x) => x.id !== watchId);
         await this.saveDoc(doc);
-        await watcher.removeTargetForUser(this.uid(ctx));
+        // remove exactly this watch — the user's other watched wallets stay live
+        await watcher.removeTargetForUser(this.uid(ctx), watchId);
         await this.cbText(ctx, 'removed');
         await this.showWatch(ctx);
         return;
       }
-      await this.saveDoc(doc);
-      await watcher.addTargetForUser(this.uid(ctx));
-      await this.cbText(ctx, w.paused ? 'paused' : 'live');
-      await this.watchDetail(ctx, watchId);
+      if (action === 'pause') {
+        w.paused = !w.paused;
+        await this.saveDoc(doc);
+        if (w.paused) {
+          await watcher.removeTargetForUser(this.uid(ctx), watchId); // free the stream
+        } else {
+          await watcher.addTargetForUser(this.uid(ctx)); // resume watching
+        }
+        await this.cbText(ctx, w.paused ? 'paused' : 'live');
+        await this.watchDetail(ctx, watchId);
+        return;
+      }
     });
 
     // trades
