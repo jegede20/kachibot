@@ -47,6 +47,10 @@ export interface WatchedWallet {
   source: 'address' | 'pumpfun';
   addedAt: number;
   paused: boolean;
+  /** when the user paused it (for "paused for X" on the card) */
+  pausedAt?: number;
+  /** last time this wallet's buy was seen on-chain (live watcher stamps it) */
+  lastBuySeenAt?: number;
 }
 
 /** one stored Solana wallet inside a user's vault (multi-wallet supported) */

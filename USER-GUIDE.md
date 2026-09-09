@@ -133,7 +133,7 @@ Tap **👀 Watchlist** to manage targets. You can watch **several wallets at the
 Each new target is labelled `ape #1`, `ape #2`… Tap a target to see:
 
 - its full `Address:`,
-- how long it's been watched and whether it's live or paused,
+- ⏱ how long it's been watched and whether it's 🟢 live or ⏸ paused (with pause duration), and when its last buy was seen,
 - its performance: copies closed, win rate, average return, SOL gained or lost.
 
 Buttons on a target:

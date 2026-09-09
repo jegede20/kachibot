@@ -16,7 +16,7 @@ import {
   decryptSecret, encryptSecret, generateMnemonic, keypairFromMnemonic,
   keypairFromSecret, keypairToSecret, parsePrivateKey,
 } from './crypto';
-import { solShort, sol, pctSigned, ago, scorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
+import { solShort, sol, pctSigned, ago, durMs, scorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
 import { parsePumpfunLink, WALLET_ADDR_RE, TELEGRAM_ALLOWED_USER_IDS, PUBLIC_URL } from './config';
 import { fetchCurve, isLiveCurve } from './chain/pump';
 import crypto from 'node:crypto';
@@ -523,12 +523,18 @@ export class KachiBot {
         const avg = mine.reduce((a, t) => a + (t.pnlPct ?? 0), 0) / mine.length;
         return `\n📊 <b>performance</b>\ncopies closed: ${mine.length} · win rate ${Math.round((wins.length / mine.length) * 100)}%\navg return ${pctSigned(avg)} · realized ${solShort(pnl)}`;
       })()
-      : '\n📊 no closed copies yet — stats fill in as you mirror this wallet';
+      : '\n📊 no closed copies yet — win rate & returns appear once a mirrored trade fully closes (TP / stop-loss / sell)';
+    const since = durMs(Math.max(0, Date.now() - w.addedAt));
+    const statusLine = w.paused
+      ? `⏸ paused${w.pausedAt ? ` for ${durMs(Math.max(0, Date.now() - w.pausedAt))}` : ''} · watched ${since} total`
+      : `⏱ watching for ${since} · 🟢 live`;
+    const buyLine = w.lastBuySeenAt ? `🕓 last buy seen ${ago(w.lastBuySeenAt)}` : null;
     const text = [
       `👁 <b>${escTag(w.label)}</b>`,
       `Address: <code>${w.address}</code>`,
       w.source === 'pumpfun' ? 'source: pump.fun link' : '',
-      `added ${ago(w.addedAt)} · ${w.paused ? '⏸ paused' : 'live'}`,
+      statusLine,
+      buyLine,
       perf,
     ].filter(Boolean).join('\n');
     const kb = this.kb([
@@ -849,6 +855,8 @@ export class KachiBot {
       }
       if (action === 'pause') {
         w.paused = !w.paused;
+        if (w.paused) w.pausedAt = Date.now();
+        else w.pausedAt = undefined;
         await this.saveDoc(doc);
         if (w.paused) {
           await watcher.removeTargetForUser(this.uid(ctx), watchId); // free the stream

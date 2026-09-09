@@ -349,11 +349,18 @@ class Watcher {
     // estimateSpend hits RPC; two users watching the same wallet shouldn't
     // each pay for the same coin twice in one tx
     const spendEstCache = new Map<string, number | null>();
+    // docs whose watch saw a buy — persist "last buy seen" once per tx
+    const dirtyDocs = new Set<UserDoc>();
     for (const ev of events) {
       const now = Date.now();
       for (const sub of subscribers) {
         const settings = sub.doc.settings;
         if (ev.side === 'buy') {
+          // remember the wallet's last seen buy (also counts buys skipped by cooldown)
+          if (sub.watch.lastBuySeenAt !== now) {
+            sub.watch.lastBuySeenAt = now;
+            dirtyDocs.add(sub.doc);
+          }
           // anti-spam: cooldown per user+watch
           const cdKey = `${sub.userId}:${sub.watch.id}`;
           const last = this.lastBuyAt.get(cdKey) || 0;
@@ -394,6 +401,12 @@ class Watcher {
         };
         // fire & forget: the trader has its own per-user serialization
         void trader.onWatchSignal(signal);
+      }
+    }
+    // persist "last buy seen" stamps (store write is debounced — cheap)
+    if (dirtyDocs.size) {
+      for (const d of dirtyDocs) {
+        try { await this.store.saveUser(d); } catch { /* best effort */ }
       }
     }
   }
