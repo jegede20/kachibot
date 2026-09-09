@@ -17,7 +17,7 @@ import {
   keypairFromSecret, keypairToSecret, parsePrivateKey,
 } from './crypto';
 import { solShort, sol, pctSigned, ago, scorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
-import { PUMPFUN_URL_RE, WALLET_ADDR_RE, TELEGRAM_ALLOWED_USER_IDS, PUBLIC_URL } from './config';
+import { parsePumpfunLink, WALLET_ADDR_RE, TELEGRAM_ALLOWED_USER_IDS, PUBLIC_URL } from './config';
 import { fetchCurve, isLiveCurve } from './chain/pump';
 import crypto from 'node:crypto';
 
@@ -437,17 +437,23 @@ export class KachiBot {
     await this.answer(ctx, text, { kb: this.kb(kbRows) });
   }
 
-  /** pump.fun coin page -> its creator wallet (the freshest ape signal on the coin) */
+  /**
+   * pump.fun link -> the wallet to watch.
+   * profile/<address> -> that address itself.
+   * coin/<mint>       -> the coin's creator wallet (the freshest ape signal).
+   */
   private async resolvePumpfunUrl(raw: string): Promise<{ kind: 'wallet' | 'err'; value?: string; message?: string }> {
-    const m = raw.trim().match(PUMPFUN_URL_RE);
-    if (!m) return { kind: 'err', message: 'that is not a pump.fun link' };
-    const pageKind = m[2] as 'coin' | 'profile';
-    const id = m[3];
-    if (pageKind === 'profile') {
-      if (!WALLET_ADDR_RE.test(id)) return { kind: 'err', message: 'username profiles aren\'t supported — copy the address from the profile page' };
-      return { kind: 'wallet', value: id };
+    const link = parsePumpfunLink(raw);
+    if (!link) {
+      if (/pump\.fun\/(?!coin\/|profile\/)/i.test(raw) && /pump\.fun\//i.test(raw)) {
+        return { kind: 'err', message: 'username profiles aren\'t supported — copy the wallet address from the profile page' };
+      }
+      return { kind: 'err', message: 'that is not a pump.fun link — use pump.fun/profile/<address> or pump.fun/coin/<mint>' };
     }
-    const st = await fetchCurve(getConnection(), new PublicKey(id)).catch(() => null);
+    if (link.kind === 'profile') {
+      return { kind: 'wallet', value: link.id };
+    }
+    const st = await fetchCurve(getConnection(), new PublicKey(link.id)).catch(() => null);
     if (st && isLiveCurve(st)) return { kind: 'wallet', value: st.curve.creator.toBase58() };
     return { kind: 'err', message: 'coin not found on the pump bonding curve (graduated or delisted) — watch its creator profile instead' };
   }

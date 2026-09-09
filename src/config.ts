@@ -57,7 +57,21 @@ export const JUPITER_QUOTE_API = process.env.JUPITER_API_URL || 'https://quote-a
 export const JUPITER_API_KEY = (process.env.JUPITER_API_KEY || '').trim();
 
 /** pump.fun profile URL patterns accepted by /watch */
-export const PUMPFUN_URL_RE = /^(https?:\/\/)?(www\.)?pump\.fun\/(coin|profile)\/([A-Za-z0-9]{32,44})/i;
+/**
+ * Parse a pump.fun link -> { kind, id }.
+ * Accepts: pump.fun/coin/<mint>, pump.fun/profile/<address>, pump.fun/<address>,
+ * with or without scheme/www, tolerating trailing slash, query strings and
+ * extra words around the link. Named groups so capture indices never drift.
+ */
+export function parsePumpfunLink(text: string): { kind: 'coin' | 'profile'; id: string } | null {
+  const m = text.match(
+    /(?:^|[^\w.@])(?:www\.)?pump\.fun\/(?:coin\/(?<mint>[1-9A-HJ-NP-Za-km-z]{32,44})|(?:profile\/)?(?<addr>[1-9A-HJ-NP-Za-km-z]{32,44}))/i,
+  );
+  if (!m || !m.groups) return null;
+  if (m.groups.mint) return { kind: 'coin', id: m.groups.mint };
+  if (m.groups.addr) return { kind: 'profile', id: m.groups.addr };
+  return null;
+}
 export const WALLET_ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 /** How long (ms) the watcher holds "seen" buy signals to fold rapid re-fires into one event. */
