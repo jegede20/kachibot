@@ -42,16 +42,24 @@ export class DodgedError extends Error {
   }
 }
 
-const keyCache = new Map<number, { at: number; kp: Keypair }>();
+const keyCache = new Map<string, { at: number; kp: Keypair }>();
+
+/** the engine must re-derive when the ACTIVE wallet changes (multi-wallet vault) */
+export function bustWalletCache(userId: number): void {
+  for (const k of keyCache.keys()) if (k.startsWith(`${userId}:`)) keyCache.delete(k);
+}
 const lastWalletWarning = new Map<number, number>();
 
 function getWallet(doc: UserDoc): Keypair | null {
   if (!doc.secret) return null;
-  const hit = keyCache.get(doc.userId);
+  // key by active-wallet identity: switching wallets mid-session must never
+  // serve the previous wallet's cached key
+  const key = `${doc.userId}:${doc.secret.slice(0, 16)}`;
+  const hit = keyCache.get(key);
   if (hit && Date.now() - hit.at < 10 * 60_000) return hit.kp;
   try {
     const kp = keypairFromSecret(decryptSecret(doc.secret));
-    keyCache.set(doc.userId, { at: Date.now(), kp });
+    keyCache.set(key, { at: Date.now(), kp });
     return kp;
   } catch (e) {
     console.error(`[trader] wallet decrypt failed for user ${doc.userId}:`, (e as Error).message);
@@ -524,7 +532,7 @@ export class Trader {
     if (!quiet) {
       await notifyUser(row.userId, scorecardText(row, closed.length, running), {
         buttons: [
-          [['📖 History', `hist:${row.userId}`], ['💸 Panic sell-all', `panic:${row.userId}`]],
+          [['📖 History', 'hist:0'], ['💸 Panic sell-all', 'panic:0']],
         ],
       });
     }

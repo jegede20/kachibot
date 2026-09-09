@@ -9,7 +9,7 @@ import { PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { getConnection } from './chain/conn';
 import { getStore } from './db';
 import { UserDoc, WalletRecord, summarizeTrades, validateAndApply } from './types';
-import { trader } from './trader';
+import { trader, bustWalletCache } from './trader';
 import { watcher } from './watcher';
 import { registerNotifier } from './notify';
 import {
@@ -264,7 +264,10 @@ export class KachiBot {
       doc.activeWalletId = doc.wallets[0]?.id ?? null;
     }
     const act = doc.wallets.find((w) => w.id === doc.activeWalletId) || doc.wallets[0] || null;
-    doc.secret = act ? act.secret : null; // trade engine reads doc.secret
+    if ((act ? act.secret : null) !== doc.secret) {
+      doc.secret = act ? act.secret : null; // trade engine reads doc.secret
+      bustWalletCache(doc.userId);
+    }
   }
 
   private activeWallet(doc: UserDoc): WalletRecord | null {
@@ -286,6 +289,7 @@ export class KachiBot {
     doc.wallets.push(w);
     doc.activeWalletId = w.id;
     doc.secret = w.secret;
+    bustWalletCache(doc.userId);
     return w;
   }
 
@@ -752,7 +756,10 @@ export class KachiBot {
       if (doc.wallets.some((w) => w.id === rest)) {
         doc.activeWalletId = rest;
         const act = doc.wallets.find((w) => w.id === rest) || null;
-        doc.secret = act ? act.secret : null;
+        if ((act ? act.secret : null) !== doc.secret) {
+          doc.secret = act ? act.secret : null;
+          bustWalletCache(this.uid(ctx));
+        }
         await this.saveDoc(doc);
       }
       await this.cbText(ctx, 'switched');
