@@ -17,6 +17,7 @@ import {
 import { trader, type WatchSignal } from './trader';
 import { UserDoc, WatchedWallet } from './types';
 import { notifyUser } from './notify';
+import { decodeMessageView, allIxs, detectSwapSignals } from './chain/txview';
 import BN from 'bn.js';
 
 const FETCH_ATTEMPTS = 4;
@@ -229,33 +230,21 @@ class Watcher {
     signature: string,
     tx: NonNullable<Awaited<ReturnType<Connection['getTransaction']>>>,
   ): Promise<void> {
-    // loose local view of the RPC message (v0 + legacy share this shape on the wire)
-    const m = (tx.transaction.message as unknown) as {
-      accountKeys: Array<{ pubkey: string; signer?: boolean; writable?: boolean } | string>;
-      instructions?: Array<{ programIdIndex: number; accounts: number[]; data: string }>;
-    };
-    // NOTE: inner (CPI) instructions are reported under meta.innerInstructions,
-    // not under message — the RPC flattens all nesting depths in order.
-    const metaAny = tx.meta as unknown as {
-      loadedAddresses?: { writable: Array<unknown>; readonly: Array<unknown> };
-      innerInstructions?: Array<{ index: number; instructions: Array<{ programIdIndex: number; accounts: number[]; data: string }> }>;
-    };
-    const innerAll = (metaAny?.innerInstructions || []).flatMap((inner) => inner.instructions || []);
-    const loadedRaw = metaAny?.loadedAddresses || { writable: [], readonly: [] };
-    const toStr = (k: unknown): string => (typeof k === 'string' ? k : ((k as { toBase58?: () => string }).toBase58?.() ?? String(k)));
-    const loaded = { writable: loadedRaw.writable.map(toStr), readonly: loadedRaw.readonly.map(toStr) };
-    const accInfo = (m.accountKeys || []).map((k) => (typeof k === 'string'
-      ? { pubkey: k, signer: false }
-      : { pubkey: k.pubkey, signer: !!k.signer }));
-    const pkeys = [...accInfo.map((a) => a.pubkey), ...loaded.writable, ...loaded.readonly];
-
-    const allIxes = [...(m.instructions || []), ...innerAll];
+    // NOTE: the RPC returns two message shapes (legacy accountKeys vs
+    // versioned staticAccountKeys+compiledInstructions+loadedAddresses).
+    // decodeMessageView normalizes both into pkeys + instructions so v0 txs
+    // (the norm in 2026) decode identically to legacy ones.
+    const view = decodeMessageView(tx);
+    if (!view) return;
+    const pkeys = view.pkeys;
+    const allIxes = allIxs(view);
 
     // ---- pump-program trade detection (live empirical disc table + log names + balance deltas) ----
     const events: Array<{
       side: 'buy' | 'sell'; name: string; mint: string;
       tokenDeltaRaw: bigint | null; userAta: string | null;
       template: { dataB64: string; accAddrs: string[]; traderPos: number; traderAtaPos: number } | null;
+      solMoved?: number | null;
     }> = [];
     const logs = (tx.meta as unknown as { logMessages?: string[] })?.logMessages || [];
     const logBuy = logs.some((l) => l.startsWith('Program log: Instruction: ') && /\bBuy/i.test(l));
@@ -329,6 +318,21 @@ class Watcher {
       if (tpl) captureTemplate(tpl);
       events.push({ side, name: sig.name, mint, tokenDeltaRaw, userAta, template: tpl });
     }
+    if (!events.length) {
+      // Off-curve trade (graduated coin on PumpSwap/Raydium/Meteora/Orca/…):
+      // no pump ix to catch, so mirror the wallet's swap via balance deltas.
+      for (const sg of detectSwapSignals(view, tx.meta, address)) {
+        events.push({
+          side: sg.side,
+          name: 'Swap',
+          mint: sg.mint,
+          tokenDeltaRaw: sg.tokenDeltaRaw,
+          userAta: null,
+          template: null,
+          solMoved: sg.solMovedLamports ?? null,
+        });
+      }
+    }
     if (!events.length) return;
 
     const targetKeys = this.targets.get(address);
@@ -377,10 +381,15 @@ class Watcher {
         // filters, so it must run on every buy regardless of whether the
         // RADAR alert happens to be enabled (it is off by default).
         let spend: number | null = null;
-        if (ev.side === 'buy' && ev.tokenDeltaRaw !== null) {
-          const ck = `${ev.mint}:${ev.tokenDeltaRaw}`;
-          if (!spendEstCache.has(ck)) spendEstCache.set(ck, await this.estimateSpend(ev.mint, ev.tokenDeltaRaw));
-          spend = spendEstCache.get(ck) ?? null;
+        if (ev.side === 'buy') {
+          if (ev.solMoved && ev.solMoved > 0) {
+            // off-curve swap: the ape's own SOL out is the truest spend measure
+            spend = ev.solMoved;
+          } else if (ev.tokenDeltaRaw !== null) {
+            const ck = `${ev.mint}:${ev.tokenDeltaRaw}`;
+            if (!spendEstCache.has(ck)) spendEstCache.set(ck, await this.estimateSpend(ev.mint, ev.tokenDeltaRaw));
+            spend = spendEstCache.get(ck) ?? null;
+          }
         }
 
         if (ev.side === 'buy' && settings.alerts.activity) {
