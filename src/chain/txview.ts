@@ -112,6 +112,19 @@ export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 export const PRIME_STALE_MS = 120_000;
 
 /**
+ * A trade older than this is never mirrored. Guards against re-analyzing
+ * history after a restart/sleep (prime vs poll window mismatch, long
+ * downtime) which would otherwise copy a buy at today's price.
+ */
+export const ANALYSIS_MAX_AGE_MS = 150_000;
+
+/** true when a transaction is too old to act on (pure, testable) */
+export function isStaleTx(blockTimeSec: number | null | undefined, nowMs: number, maxAgeMs = ANALYSIS_MAX_AGE_MS): boolean {
+  if (!blockTimeSec || blockTimeSec <= 0) return false; // unknown age -> let normal flow decide
+  return nowMs - blockTimeSec * 1000 > maxAgeMs;
+}
+
+/**
  * Decide the side of a pump trade event.
  * - If the classified pump instruction contains the watched wallet (traderPos>=0)
  *   the instruction itself is authoritative (ix classification + log names).

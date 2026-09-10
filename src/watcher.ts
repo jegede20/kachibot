@@ -17,7 +17,7 @@ import {
 import { trader, type WatchSignal } from './trader';
 import { UserDoc, WatchedWallet } from './types';
 import { notifyUser } from './notify';
-import { decodeMessageView, allIxs, detectSwapSignals, determineSide, PRIME_STALE_MS } from './chain/txview';
+import { decodeMessageView, allIxs, detectSwapSignals, determineSide, PRIME_STALE_MS, isStaleTx } from './chain/txview';
 import BN from 'bn.js';
 
 const FETCH_ATTEMPTS = 4;
@@ -152,7 +152,9 @@ class Watcher {
   /** mark the most recent signatures as processed WITHOUT analyzing them */
   private async prime(address: string): Promise<void> {
     try {
-      const sigs = await this.conn.getSignaturesForAddress(new PublicKey(address), { limit: 8 }, 'confirmed');
+      // fetch MORE than poll() does, so a restart can never leave un-primed
+      // signatures inside the poll window for re-analysis
+      const sigs = await this.conn.getSignaturesForAddress(new PublicKey(address), { limit: 16 }, 'confirmed');
       const cutoff = Date.now() - PRIME_STALE_MS;
       for (const sg of sigs || []) {
         // Only swallow genuinely OLD history. Prime must never eat buys that
@@ -277,6 +279,9 @@ class Watcher {
     // versioned staticAccountKeys+compiledInstructions+loadedAddresses).
     // decodeMessageView normalizes both into pkeys + instructions so v0 txs
     // (the norm in 2026) decode identically to legacy ones.
+    // hard guard: never mirror a trade that happened too long ago (bot was
+    // asleep / restarting). Prevents copying an old buy at today's price.
+    if (isStaleTx(tx.blockTime, Date.now())) return;
     const view = decodeMessageView(tx);
     if (!view) return;
     const pkeys = view.pkeys;

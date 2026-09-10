@@ -11,7 +11,7 @@ const path = require('node:path');
 
 const {
   decodeMessageView, allIxs, programsOf, detectSwapSignals, DEX_SWAP_PROGS,
-  determineSide, PRIME_STALE_MS,
+  determineSide, PRIME_STALE_MS, isStaleTx, ANALYSIS_MAX_AGE_MS,
 } = require('../dist/chain/txview');
 const { classifyPumpIx } = require('../dist/chain/pump');
 
@@ -111,4 +111,19 @@ test('determineSide trusts the watched wallet delta in bundled txs', () => {
 
 test('PRIME_STALE_MS leaves a window for buys made during a restart gap', () => {
   assert.ok(PRIME_STALE_MS >= 60_000 && PRIME_STALE_MS <= 300_000, 'prime window sane');
+});
+
+
+test('isStaleTx blocks restart-gap replays but allows fresh buys', () => {
+  const now = 1_800_000_000_000;
+  // a buy 30s old (short restart gap) must still be mirrored
+  assert.strictEqual(isStaleTx(now / 1000 - 30, now), false);
+  // a buy from 2 minutes ago is still inside the window
+  assert.strictEqual(isStaleTx(now / 1000 - 120, now), false);
+  // a buy from an hour ago (long sleep) must never be mirrored
+  assert.strictEqual(isStaleTx(now / 1000 - 3600, now), true);
+  // unknown blockTime -> not treated as stale
+  assert.strictEqual(isStaleTx(null, now), false);
+  assert.strictEqual(isStaleTx(0, now), false);
+  assert.ok(ANALYSIS_MAX_AGE_MS > PRIME_STALE_MS, 'analysis window must exceed prime window');
 });
