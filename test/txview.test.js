@@ -11,6 +11,7 @@ const path = require('node:path');
 
 const {
   decodeMessageView, allIxs, programsOf, detectSwapSignals, DEX_SWAP_PROGS,
+  determineSide, PRIME_STALE_MS,
 } = require('../dist/chain/txview');
 const { classifyPumpIx } = require('../dist/chain/pump');
 
@@ -92,4 +93,22 @@ test('detectSwapSignals ignores non-DEX transfers and dust moves', () => {
   // spoof: zero out program ids -> no DEX -> no signals even with the same deltas
   const blank = { pkeys: view.pkeys, top: [], inner: [] };
   assert.deepStrictEqual(detectSwapSignals(blank, tx.meta, FH5H), []);
+});
+
+
+test('determineSide trusts the watched wallet delta in bundled txs', () => {
+  // bundled tx: the pump ix belongs to a router (traderPos -1). The ape SOLD.
+  // Old logic used the foreign ix + global logs -> wrongly reported "buy".
+  assert.strictEqual(determineSide('buy', true, false, -1, -1), 'sell');
+  assert.strictEqual(determineSide('sell', false, true, -1, 1), 'buy');
+  // when the ix IS the ape's own (traderPos >= 0), the ix wins
+  assert.strictEqual(determineSide('buy', true, false, 3, -1), 'buy');
+  assert.strictEqual(determineSide('sell', false, true, 3, 1), 'sell');
+  // no delta information -> previous behaviour (ix + logs)
+  assert.strictEqual(determineSide('buy', false, true, -1, 0), 'sell');
+  assert.strictEqual(determineSide('buy', true, false, -1, 0), 'buy');
+});
+
+test('PRIME_STALE_MS leaves a window for buys made during a restart gap', () => {
+  assert.ok(PRIME_STALE_MS >= 60_000 && PRIME_STALE_MS <= 300_000, 'prime window sane');
 });

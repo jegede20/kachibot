@@ -17,7 +17,7 @@ import {
 import { trader, type WatchSignal } from './trader';
 import { UserDoc, WatchedWallet } from './types';
 import { notifyUser } from './notify';
-import { decodeMessageView, allIxs, detectSwapSignals } from './chain/txview';
+import { decodeMessageView, allIxs, detectSwapSignals, determineSide, PRIME_STALE_MS } from './chain/txview';
 import BN from 'bn.js';
 
 const FETCH_ATTEMPTS = 4;
@@ -39,6 +39,35 @@ class Watcher {
   /** address -> timestamp of last processed tx per target (cooldown) */
   private lastBuyAt = new Map<string, number>();
   private spamWarned = new Map<string, number>();
+
+  /** read-only health snapshot for the /status endpoint (no full addresses) */
+  async debugState(): Promise<Record<string, unknown>> {
+    const users = await this.allUserDocs().catch(() => [] as UserDoc[]);
+    const watches: Array<Record<string, unknown>> = [];
+    for (const u of users) {
+      for (const w of u.watched || []) {
+        watches.push({
+          label: w.label,
+          prefix: String(w.address).slice(0, 6),
+          paused: !!w.paused,
+          subscribed: this.wsByAddress.has(w.address),
+          addedAt: w.addedAt,
+          lastBuySeenAt: w.lastBuySeenAt ?? null,
+        });
+      }
+    }
+    const lastPollAgesSec = [...this.lastPollAt.values()]
+      .map((t) => Math.round((Date.now() - t) / 1000))
+      .sort((a, b) => a - b)
+      .slice(0, 12);
+    return {
+      targets: this.targets.size,
+      subscriptions: this.wsByAddress.size,
+      processedSets: this.processed.size,
+      lastPollAgesSec,
+      watches,
+    };
+  }
 
   /** called at boot: load every user's watches */
   async syncAll(): Promise<void> {
@@ -124,7 +153,15 @@ class Watcher {
   private async prime(address: string): Promise<void> {
     try {
       const sigs = await this.conn.getSignaturesForAddress(new PublicKey(address), { limit: 8 }, 'confirmed');
-      for (const sg of sigs || []) this.markProcessed(address, sg.signature);
+      const cutoff = Date.now() - PRIME_STALE_MS;
+      for (const sg of sigs || []) {
+        // Only swallow genuinely OLD history. Prime must never eat buys that
+        // happened moments ago — that is exactly what happens when a host
+        // restarts / wakes from sleep and the ape traded during the gap.
+        const bt = (sg.blockTime || 0) * 1000;
+        if (bt && bt >= cutoff) continue;
+        this.markProcessed(address, sg.signature);
+      }
     } catch {
       // best effort — the account-change stream + backstop still cover live buys
     }
@@ -147,7 +184,10 @@ class Watcher {
   startBackstop(intervalMs = 7000): void {
     const tick = (): void => {
       const now = Date.now();
-      for (const address of this.wsByAddress.keys()) {
+      // poll every TARGET (not just successfully-subscribed addresses): if a
+      // websocket subscription ever dies silently, polling must continue.
+      const pollSet = new Set<string>([...this.wsByAddress.keys(), ...this.targets.keys()]);
+      for (const address of pollSet) {
         void this.poll(address, true);
       }
       // self-heal: if a subscription failed or died, resubscribe (throttled)
@@ -162,13 +202,16 @@ class Watcher {
     if (typeof t.unref === 'function') t.unref();
   }
 
+  private lastPollAt = new Map<string, number>();
+
   private async poll(address: string, backstop: boolean): Promise<void> {
     if (this.inFlight.has(address)) return; // serialize per address
     this.inFlight.set(address, Date.now());
+    this.lastPollAt.set(address, Date.now());
     try {
       const sigs = await this.conn.getSignaturesForAddress(
         new PublicKey(address),
-        { limit: 4 },
+        { limit: 10 },
         'confirmed',
       );
       for (const s of sigs || []) {
@@ -280,10 +323,11 @@ class Watcher {
       // find the token this ix trades: any non-wSOL mint with a watched-wallet delta
       let mint: string | null = null;
       let tokenDeltaRaw: bigint | null = null;
+      let deltaSign = 0;
       let userAta: string | null = null;
       for (const [m, d] of watchedDeltas) {
         if (m === wsolStr) continue;
-        if (!mint) { mint = m; tokenDeltaRaw = d < 0n ? -d : d; }
+        if (!mint) { mint = m; tokenDeltaRaw = d < 0n ? -d : d; deltaSign = d > 0n ? 1 : d < 0n ? -1 : 0; }
       }
       if (!mint) {
         // no balance delta recorded for this wallet — rely on canonical ATA presence
@@ -293,7 +337,7 @@ class Watcher {
       }
       if (!mint) continue;
       // template capture: account vector + payload of this live trade
-      const side: 'buy' | 'sell' = sig.side === 'sell' ? 'sell' : (logSell && !logBuy ? 'sell' : 'buy');
+      const side = determineSide(sig.side, logBuy, logSell, traderPos, deltaSign);
       const canTok22 = deriveAta(new PublicKey(address), new PublicKey(mint), TOKEN_2022_PROGRAM_ID).toBase58();
       const canSpl = deriveAta(new PublicKey(address), new PublicKey(mint), TOKEN_PROGRAM_ID).toBase58();
       const tok22Idx = accAddrs.indexOf(canTok22);

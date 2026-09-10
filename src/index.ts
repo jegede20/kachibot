@@ -48,6 +48,25 @@ async function main(): Promise<void> {
       res.end(guide);
       return;
     }
+    if (url === '/status') {
+      void watcher.debugState()
+        .then((w) => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true,
+            service: 'kachibot',
+            uptimeSec: Math.round(process.uptime()),
+            startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+            ts: Date.now(),
+            watcher: w,
+          }));
+        })
+        .catch((e: Error) => {
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        });
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, service: 'kachibot', ts: Date.now() }));
   });

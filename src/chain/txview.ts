@@ -108,6 +108,30 @@ export const SWAP_MIN_SOL_LAMPORTS = 200_000; // 0.0002 SOL
 
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
+/** how old a signature may be at prime time and still be analyzed (ms) */
+export const PRIME_STALE_MS = 120_000;
+
+/**
+ * Decide the side of a pump trade event.
+ * - If the classified pump instruction contains the watched wallet (traderPos>=0)
+ *   the instruction itself is authoritative (ix classification + log names).
+ * - Otherwise the tx is bundled/multi-party (a router or another trader owns the
+ *   pump instruction): trust the WATCHED WALLET's own token delta sign instead,
+ *   so a sell by the ape is never mirrored as a buy (and vice versa).
+ */
+export function determineSide(
+  ixSide: 'buy' | 'sell',
+  logBuy: boolean,
+  logSell: boolean,
+  traderPos: number,
+  watchedTokenDeltaSign: number,
+): 'buy' | 'sell' {
+  if (traderPos < 0 && watchedTokenDeltaSign !== 0) {
+    return watchedTokenDeltaSign > 0 ? 'buy' : 'sell';
+  }
+  return ixSide === 'sell' ? 'sell' : (logSell && !logBuy ? 'sell' : 'buy');
+}
+
 export interface SwapSignal {
   side: 'buy' | 'sell';
   mint: string;
