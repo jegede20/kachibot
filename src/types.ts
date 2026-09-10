@@ -127,6 +127,61 @@ export interface TrailingStopConfig {
 }
 
 /** per-watch buy-size override (otherwise the global size is used) */
+/**
+ * Ape reputation filter — judges a watched wallet by the track record of the
+ * copies it produced, so a wallet that keeps handing you losses can be
+ * skipped (or halved) automatically. Costs no entry latency.
+ */
+export interface ReputationConfig {
+  enabled: boolean;
+  /** do not judge a wallet until it has this many closed copies */
+  minTrades: number;
+  /** win rate floor (0..1) — below this the wallet is judged weak */
+  minWinRate: number;
+  /** 'skip' = do not copy at all · 'halve' = copy at half size */
+  onFail: 'skip' | 'halve';
+}
+
+/** fill in a reputation config for docs created before this feature existed */
+export function normalizeReputation(cfg: unknown): ReputationConfig {
+  const c = (cfg || {}) as Partial<ReputationConfig>;
+  const min = Number(c.minTrades);
+  const win = Number(c.minWinRate);
+  return {
+    enabled: !!c.enabled,
+    minTrades: Number.isFinite(min) && min >= 1 ? Math.floor(min) : 10,
+    minWinRate: Number.isFinite(win) ? Math.min(1, Math.max(0, win)) : 0.3,
+    onFail: c.onFail === 'halve' ? 'halve' : 'skip',
+  };
+}
+
+export function evaluateReputation(
+  stats: { closed?: number; winRate?: number } | null | undefined,
+  cfg: ReputationConfig,
+): { judged: boolean; pass: boolean; winRate: number; closed: number } {
+  const closed = Number(stats?.closed) || 0;
+  const winRate = Number(stats?.winRate) || 0;
+  const min = Math.max(1, Math.floor(Number(cfg?.minTrades) || 1));
+  const floor = Math.min(1, Math.max(0, Number(cfg?.minWinRate) || 0));
+  if (closed < min) return { judged: false, pass: true, winRate, closed };
+  return { judged: true, pass: winRate >= floor, winRate, closed };
+}
+
+/** scorecard of one watched wallet (closed copies only) */
+export function watchReputation(rows: TradeRow[], watchId: string | null | undefined): TradeHistorySummary {
+  if (!watchId) return summarizeTrades([]);
+  return summarizeTrades((rows || []).filter((r) => r.watchId === watchId));
+}
+
+/** human label for the per-wallet confirm-hold delay */
+export function describeConfirmHold(ms: number | null | undefined): string {
+  const v = Number(ms);
+  if (!Number.isFinite(v) || v <= 0) return 'copy instantly';
+  if (v < 60_000) return `wait ${Math.round(v / 1000)}s to confirm they hold`;
+  if (v < 3_600_000) return `wait ${Math.round(v / 60_000)}m to confirm they hold`;
+  return `wait ${(v / 3_600_000).toFixed(1)}h to confirm they hold`;
+}
+
 export interface BuySizeConfig {
   mode: BuyMode;
   /** fixed: lamports per snipe · pct: fraction (0..1) of the watched spend */
@@ -163,6 +218,7 @@ export function ensureSettings(s: UserSettings): UserSettings {
   if (s.maxHoldMs === undefined) s.maxHoldMs = DEFAULT_SETTINGS.maxHoldMs;
   if (typeof s.lowBalanceWarnLamports !== 'number') s.lowBalanceWarnLamports = DEFAULT_SETTINGS.lowBalanceWarnLamports;
   if (!s.exit) s.exit = { ...EXIT_DEFAULT };
+  if (!s.reputation) s.reputation = { ...DEFAULT_SETTINGS.reputation };
   return s;
 }
 
@@ -221,6 +277,8 @@ export interface UserSettings {
   maxHoldMs: number | null;
   /** warn when the trading wallet drops below this balance (lamports); 0 = off */
   lowBalanceWarnLamports: number;
+  /** skip/soften copies from watched wallets with a losing track record */
+  reputation: ReputationConfig;
   /** ignore watched buys smaller than this (lamports) */
   minSpendLamports: number;
   /** ignore watched buys larger than this (lamports) */
@@ -251,6 +309,12 @@ export interface WatchedWallet {
   exit?: ExitConfig | null;
   /** per-wallet buy size; null/absent = inherit the global size */
   buySize?: BuySizeConfig | null;
+  /**
+   * Per-wallet confirm-hold delay (ms): wait this long after the ape buys and
+   * only copy if they are still holding. 0/null = copy instantly (default).
+   * Skips apes who dump within seconds, at the cost of a later entry.
+   */
+  confirmHoldMs?: number | null;
 }
 
 /** one stored Solana wallet inside a user's vault (multi-wallet supported) */
@@ -473,6 +537,24 @@ export function validateAndApply(path: string, rawValue: string, s: UserSettings
       return e
         ? { ok: false, error: e }
         : { ok: true, applied: num <= 0 ? 'low-balance alert off' : `warn below ${num} SOL` };
+    }
+    case 'rep_trades': {
+      const r = normalizeReputation(s.reputation);
+      const raw = Number(v);
+      if (!Number.isInteger(raw) || raw < 1 || raw > 100) {
+        return { ok: false, error: 'enter how many closed copies before judging, 1–100' };
+      }
+      s.reputation = { ...r, minTrades: raw };
+      return { ok: true, applied: `judge apes after ${raw} copies` };
+    }
+    case 'rep_win': {
+      const r = normalizeReputation(s.reputation);
+      const raw = Number(v.replace(/%$/, '')) / 100;
+      if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
+        return { ok: false, error: 'enter a win rate between 0 and 100 (e.g. 30)' };
+      }
+      s.reputation = { ...r, minWinRate: raw };
+      return { ok: true, applied: `apes need ≥${Math.round(raw * 100)}% win rate` };
     }
     case 'stop_loss': {
       const e = setNum(0.01, 0.99, (x) => { s.stopLossPct = x; });

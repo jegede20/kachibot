@@ -10,7 +10,8 @@ import { getStore, Store } from './db';
 import {
   UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit,
   resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing,
-  type TrailingStopConfig, type BuySizeConfig,
+  evaluateReputation, watchReputation,
+  type TrailingStopConfig, type BuySizeConfig, type ReputationConfig,
 } from './types';
 import {
   curvePhase, fetchCurve, loadPricingCtx, sellSolLamportsForTokenAmount,
@@ -104,6 +105,22 @@ export function computeBudget(size: BuySizeConfig, watchedSpend: number | null, 
   return Math.max(0, Math.min(budget, perTradeCapLamports));
 }
 
+/** options for an internal re-entry into the buy path */
+export interface CopyOpts {
+  /** copy at half size (reputation filter) */
+  halve?: boolean;
+  /** skip the confirm-hold wait (already waited) */
+  skipConfirm?: boolean;
+}
+
+/** human delay text: never rounds a real wait down to "0s" */
+function secsTxt(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${Math.max(1, Math.round(ms / 1000))}s`;
+}
+
+/** fraction of their bag an ape may sell inside the confirm window before we skip */
+export const CONFIRM_DUMP_FRACTION = 0.5;
+
 /** how many raw tokens to sell for a fraction of the remaining bag (pure, tested) */
 export function tokensForFraction(remaining: bigint, entryTotal: bigint, frac: number): bigint {
   if (remaining <= 0n) return 0n;
@@ -128,6 +145,10 @@ export class Trader {
   /** throttles for the low-balance heads-up */
   private balanceCheckedAt = new Map<number, number>();
   private balanceWarnedAt = new Map<number, number>();
+  /** buys waiting for their confirm-hold window to elapse */
+  private pendingConfirms = new Set<string>();
+  /** confirmed copies that the reputation filter asked to halve */
+  private halvedConfirm = new Map<string, boolean>();
 
   touchUser(userId: number): void {
     this.knownUsers.add(userId);
@@ -143,16 +164,93 @@ export class Trader {
 
   /* ============================ watch dispatch ============================ */
 
-  async onWatchSignal(ev: WatchSignal): Promise<void> {
+  async onWatchSignal(ev: WatchSignal, opts?: CopyOpts): Promise<void> {
     await this.chained(ev.userId, async () => {
       const doc = await this.store.getUser(ev.userId);
       if (!doc.watched.some((w) => w.id === ev.watchId)) return; // watch removed meanwhile
-      if (ev.side === 'buy') await this.handleWatchedBuy(doc, ev);
+      if (ev.side === 'buy') await this.handleWatchedBuy(doc, ev, opts);
       else await this.handleWatchedSell(doc, ev);
     });
   }
 
-  private async handleWatchedBuy(doc: UserDoc, ev: WatchSignal): Promise<void> {
+  /* ------------------------- reputation + confirm ------------------------- */
+
+  /**
+   * Judge the watched wallet by the copies it already produced. A wallet with
+   * a losing track record is skipped (or copied at half size) — this costs no
+   * entry latency, unlike the confirm-hold delay.
+   */
+  private async reputationGate(doc: UserDoc, ev: WatchSignal): Promise<{ proceed: boolean; halve: boolean }> {
+    const cfg: ReputationConfig | null = doc.settings.reputation || null;
+    if (!cfg || !cfg.enabled) return { proceed: true, halve: !!this.halvedConfirm.get(`${doc.userId}:${ev.mint}`) };
+    const rows = await this.store.listTrades(doc.userId).catch(() => [] as TradeRow[]);
+    const stats = watchReputation(rows, ev.watchId);
+    const v = evaluateReputation(stats, cfg);
+    if (!v.judged || v.pass) return { proceed: true, halve: false };
+    const record = `${Math.round(v.winRate * 100)}% win rate over ${v.closed} copies`;
+    const floor = `${Math.round(cfg.minWinRate * 100)}%`;
+    if (cfg.onFail === 'skip') {
+      await notifyUser(
+        doc.userId,
+        `🧾 <b>SKIPPED — WEAK APE</b> — ${escTag(ev.watchedLabel)} is at ${record}, below your ${floor} floor.\n`
+        + `No funds spent on ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)}. Change it in ⚙️ Settings → 👤 reputation.`,
+        { silent: true },
+      );
+      return { proceed: false, halve: false };
+    }
+    return { proceed: true, halve: true };
+  }
+
+  /** true only on POSITIVE evidence that the ape dumped; unknown = fail-open */
+  private async apeDumpCheck(ev: WatchSignal, dumpFrac = CONFIRM_DUMP_FRACTION): Promise<{ dumped: boolean; soldPct: number }> {
+    const bought = BigInt(ev.tokenAmountRaw || '0');
+    const now = await this.tokenBalanceOf(new PublicKey(ev.watchedAddress), new PublicKey(ev.mint)).catch(() => null);
+    if (now === null) return { dumped: false, soldPct: 0 }; // could not verify -> copy anyway
+    if (bought <= 0n) return { dumped: now <= 0n, soldPct: 100 };
+    const kept = Number(now) / Number(bought);
+    const soldPct = Math.max(0, Math.min(100, Math.round((1 - kept) * 100)));
+    return { dumped: kept <= 1 - dumpFrac, soldPct };
+  }
+
+  /** wait, verify the ape still holds, then copy (per-wallet confirm-hold) */
+  private async scheduleConfirmedCopy(doc: UserDoc, ev: WatchSignal, delayMs: number, halve: boolean): Promise<void> {
+    const key = `${doc.userId}:${ev.watchedAddress}:${ev.mint}`;
+    if (this.pendingConfirms.has(key)) return; // already waiting on this one
+    this.pendingConfirms.add(key);
+    if (halve) this.halvedConfirm.set(`${doc.userId}:${ev.mint}`, true);
+    if (doc.settings.alerts.activity) {
+      await notifyUser(
+        doc.userId,
+        `⏳ <b>CONFIRMING</b> — ${escTag(ev.watchedLabel)} bought ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)}. `
+        + `Waiting ${secsTxt(delayMs)} to see if they hold before copying.`,
+        { silent: true },
+      );
+    }
+    const t = setTimeout(async () => {
+      this.pendingConfirms.delete(key);
+      this.halvedConfirm.delete(`${doc.userId}:${ev.mint}`);
+      try {
+        const v = await this.apeDumpCheck(ev);
+        if (v.dumped) {
+          await notifyUser(
+            doc.userId,
+            `🚫 <b>SKIPPED — INSTANT DUMP</b> — ${escTag(ev.watchedLabel)} sold ${v.soldPct}% of their `
+            + `${coinTag(ev.mintName, ev.mintSymbol, ev.mint)} within ${secsTxt(delayMs)} of buying. Nothing copied.`,
+            { silent: true },
+          );
+          return;
+        }
+      } catch (e) {
+        console.error('[trader] confirm-hold check failed:', (e as Error).message);
+      }
+      await this.onWatchSignal(ev, { halve, skipConfirm: true }).catch((e) => {
+        console.error('[trader] confirmed copy failed:', (e as Error).message);
+      });
+    }, delayMs);
+    if (typeof t.unref === 'function') t.unref();
+  }
+
+  private async handleWatchedBuy(doc: UserDoc, ev: WatchSignal, opts?: CopyOpts): Promise<void> {
     const conn = getConnection();
     const s = doc.settings;
     const wallet = getWallet(doc);
@@ -172,6 +270,10 @@ export class Trader {
       }
     }
 
+    // reputation gate: judge the ape by the copies it already produced
+    const gate = await this.reputationGate(doc, ev);
+    if (!gate.proceed) return;
+
     const phase = await curvePhase(conn, new PublicKey(ev.mint)).catch(() => 'unknown' as const);
     if (phase === 'unknown' || phase === 'none') {
       if (s.alerts.activity) {
@@ -180,8 +282,18 @@ export class Trader {
       return;
     }
 
-    const buySize = resolveBuySize(doc, ev.watchId ? doc.watched.find((w) => w.id === ev.watchId) || null : null);
-    const budget = computeBudget(buySize, ev.spendLamports, s.perTradeCapLamports);
+    // per-wallet confirm-hold: pause, verify the ape still holds, then copy
+    const watch = ev.watchId ? doc.watched.find((w) => w.id === ev.watchId) || null : null;
+    const holdMs = Number(watch?.confirmHoldMs || 0);
+    const halve = gate.halve || !!opts?.halve;
+    if (holdMs > 0 && !opts?.skipConfirm) {
+      await this.scheduleConfirmedCopy(doc, ev, holdMs, halve);
+      return;
+    }
+
+    const buySize = resolveBuySize(doc, watch);
+    const budget0 = computeBudget(buySize, ev.spendLamports, s.perTradeCapLamports);
+    const budget = halve ? Math.floor(budget0 / 2) : budget0;
     if (budget <= 0) return;
 
     const bal = await conn.getBalance(wallet.publicKey, 'confirmed').catch(() => -1);

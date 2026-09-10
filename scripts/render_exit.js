@@ -52,6 +52,12 @@ const show = (ctx) => { for (const m of ctx.out) {
   console.log('=== BUY SIZE MENU ===');
   show(ctx);
 
+  // confirm-hold menu
+  ctx = fakeCtx(uid, true);
+  await b.showConfirmMenu(ctx, w.id);
+  console.log('=== CONFIRM HOLD MENU ===');
+  show(ctx);
+
   // settings screen
   ctx = fakeCtx(uid, true);
   await b.showSettings(ctx);

@@ -9,7 +9,8 @@ const {
   validateAndApply, defaultSettings, summarizeTrades, lamportsToSol,
   resolveExit, normalizeExit, describeExit, exitSellFraction, parseExitInput,
   formatMcapUsd, EXIT_DEFAULT, normalizeTrailing, trailingExitMultiple, breakEvenArmed,
-  resolveBuySize, describeBuySize,
+  resolveBuySize, describeBuySize, evaluateReputation, watchReputation,
+  describeConfirmHold, normalizeReputation,
 } = require('../dist/types');
 const { computeBudget } = require('../dist/trader');
 const { solShort, scorecardText, chartLink, pctSigned, coinTag, solExact } = require('../dist/format');
@@ -383,4 +384,61 @@ test('risk settings validate and apply (trailing, max hold, low balance)', () =>
   delete legacy.trailing;
   assert.strictEqual(validateAndApply('trail_arm', '5', legacy).ok, true);
   assert.strictEqual(legacy.trailing.trailPct, 0.25);
+});
+
+test('reputation filter only judges a wallet once it has enough history', () => {
+  const cfg = { enabled: true, minTrades: 10, minWinRate: 0.3, onFail: 'skip' };
+  // too few copies -> always trusted (never blocks a new wallet)
+  assert.deepStrictEqual(evaluateReputation({ closed: 3, winRate: 0 }, cfg), { judged: false, pass: true, winRate: 0, closed: 3 });
+  assert.deepStrictEqual(evaluateReputation({ closed: 9, winRate: 0.1 }, cfg), { judged: false, pass: true, winRate: 0.1, closed: 9 });
+  // enough history, win rate below the floor -> judged weak
+  assert.strictEqual(evaluateReputation({ closed: 10, winRate: 0.2 }, cfg).pass, false);
+  assert.strictEqual(evaluateReputation({ closed: 10, winRate: 0.2 }, cfg).judged, true);
+  // at or above the floor -> trusted
+  assert.strictEqual(evaluateReputation({ closed: 10, winRate: 0.3 }, cfg).pass, true);
+  assert.strictEqual(evaluateReputation({ closed: 40, winRate: 0.55 }, cfg).pass, true);
+  // missing stats from a legacy doc
+  assert.deepStrictEqual(evaluateReputation(null, cfg), { judged: false, pass: true, winRate: 0, closed: 0 });
+  assert.deepStrictEqual(normalizeReputation({ enabled: true }), { enabled: true, minTrades: 10, minWinRate: 0.3, onFail: 'skip' });
+  assert.strictEqual(normalizeReputation({ onFail: 'halve' }).onFail, 'halve');
+  assert.strictEqual(normalizeReputation(undefined).enabled, false);
+});
+
+test("watch reputation only counts a single wallet closed copies", () => {
+  const mk = (watchId, status, pnl) => ({ id: `${watchId}-${Math.random()}`, watchId, status, pnlLamports: pnl, pnlPct: pnl / 1e8 });
+  const rows = [
+    mk('w1', 'closed', 1e8), mk('w1', 'closed', -1e8), mk('w1', 'closed', 2e8), mk('w1', 'closed', -1e8),
+    mk('w1', 'open', 5e8),           // open copies must not count
+    mk('w2', 'closed', -1e8),        // another wallet's losses must not count
+  ];
+  const st = watchReputation(rows, 'w1');
+  assert.strictEqual(st.closed, 4);
+  assert.strictEqual(st.winRate, 0.5); // 2 wins / 4 closed
+  assert.strictEqual(watchReputation(rows, 'unknown').closed, 0);
+});
+
+test('confirm-hold delay renders clearly and defaults to instant', () => {
+  assert.strictEqual(describeConfirmHold(null), 'copy instantly');
+  assert.strictEqual(describeConfirmHold(0), 'copy instantly');
+  assert.strictEqual(describeConfirmHold(15_000), 'wait 15s to confirm they hold');
+  assert.strictEqual(describeConfirmHold(90_000), 'wait 2m to confirm they hold');
+  assert.strictEqual(describeConfirmHold(3_600_000), 'wait 1.0h to confirm they hold');
+});
+
+test('reputation settings validate and apply', () => {
+  const s = defaultSettings();
+  let r = validateAndApply('rep_trades', '12', s);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(s.reputation.minTrades, 12);
+  r = validateAndApply('rep_win', '35', s);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(s.reputation.minWinRate, 0.35);
+  assert.strictEqual(validateAndApply('rep_win', '140', s).ok, false);
+  assert.strictEqual(validateAndApply('rep_trades', '0', s).ok, false);
+  assert.strictEqual(validateAndApply('rep_trades', '3.5', s).ok, false); // must be whole
+  // works on a legacy doc that predates the feature
+  const legacy = defaultSettings();
+  delete legacy.reputation;
+  assert.strictEqual(validateAndApply('rep_win', '40', legacy).ok, true);
+  assert.strictEqual(legacy.reputation.minTrades, 10);
 });

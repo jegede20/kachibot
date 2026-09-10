@@ -12,6 +12,7 @@ import {
   UserDoc, WalletRecord, summarizeTrades, validateAndApply,
   resolveExit, normalizeExit, describeExit, parseExitInput, formatMcapUsd, EXIT_DEFAULT,
   resolveBuySize, describeBuySize, normalizeTrailing,
+  evaluateReputation, watchReputation, describeConfirmHold, normalizeReputation,
   type ExitConfig, type ExitMode, type BuySizeConfig,
 } from './types';
 import { trader, bustWalletCache } from './trader';
@@ -48,10 +49,13 @@ const SETTING_LABELS: Array<[string, string]> = [
   ['📉 Trail back %', 'trail_pct'],
   ['⏳ Max hold (hours, 0 = off)', 'max_hold'],
   ['⚠️ Low balance alert (SOL)', 'low_bal'],
+  ['🧾 Judge ape after N copies', 'rep_trades'],
+  ['📉 Min ape win rate %', 'rep_win'],
 ];
 
 function settingsSummary(s: UserDoc['settings']): string {
   const trail = normalizeTrailing(s.trailing);
+  const repCfg = normalizeReputation(s.reputation);
   const mode = s.buyMode === 'pct'
     ? `${Math.round(s.buyPctOfSpend * 100)}% of watched spend`
     : `fixed ${sol(s.buyAmountLamports)}`;
@@ -64,6 +68,7 @@ function settingsSummary(s: UserDoc['settings']): string {
     `🎗 break-even stop: <b>${s.breakEvenStop ? 'ON' : 'off'}</b>`,
     `⏳ max hold: <b>${s.maxHoldMs ? `${(s.maxHoldMs / 3_600_000).toFixed(1)}h` : 'off'}</b>`,
     `⚠️ low-balance alert: <b>${s.lowBalanceWarnLamports > 0 ? `below ${sol(s.lowBalanceWarnLamports)}` : 'off'}</b>`,
+    `👤 reputation: <b>${repCfg.enabled ? `${repCfg.onFail === 'skip' ? 'skip' : 'halve'} apes under ${Math.round(repCfg.minWinRate * 100)}% win (after ${repCfg.minTrades} copies)` : 'off'}</b>`,
     `🛑 stop-loss: <b>-${Math.round(s.stopLossPct * 100)}%</b>`,
     `👻 copy-sell: <b>${s.copySell ? 'ON' : 'off'}</b>`,
     `💸 exit rule: <b>${describeExit(normalizeExit(s.exit))}</b>`,
@@ -245,6 +250,10 @@ export class KachiBot {
       B(`🎏 trailing ${s.trailing?.enabled ? '✅' : '⬜'}`, 's:trailing'),
       B(`🎗 break-even ${s.breakEvenStop ? '✅' : '⬜'}`, 's:breakeven'),
     ));
+    kbRows.push(row(
+      B(`👤 reputation ${s.reputation?.enabled ? '✅' : '⬜'}`, 's:rep'),
+      B(`🧾 weak ape → ${s.reputation?.onFail === 'halve' ? 'HALVE SIZE' : 'SKIP'}`, 's:repfail'),
+    ));
     kbRows.push(row(B('💸 Exit rule (all wallets)', 's:exit')));
     kbRows.push(row(B('🔙 Main', 'm:main')));
     await this.answer(ctx, `⚙️ <b>TRADING SETTINGS</b>\n\n${settingsSummary(s)}\n\nTap to change:`, { kb: this.kb(kbRows) });
@@ -267,6 +276,8 @@ export class KachiBot {
       case 'trail_pct': return `${Math.round((s.trailing?.trailPct ?? 0.25) * 100)}%`;
       case 'max_hold': return s.maxHoldMs ? `${(s.maxHoldMs / 3_600_000).toFixed(1)}h` : 'off';
       case 'low_bal': return s.lowBalanceWarnLamports > 0 ? sol(s.lowBalanceWarnLamports) : 'off';
+      case 'rep_trades': return `${s.reputation?.minTrades ?? 10}`;
+      case 'rep_win': return `${Math.round((s.reputation?.minWinRate ?? 0.3) * 100)}%`;
       default: return '';
     }
   }
@@ -557,6 +568,16 @@ export class KachiBot {
     const exitLine = `💸 exit: <b>${describeExit(exitCfg)}</b>${w.exit ? '' : ' (default)'}`;
     const sizeCfg = resolveBuySize(doc, w);
     const sizeLine = `💰 size: <b>${describeBuySize(sizeCfg)}</b>${w.buySize ? '' : ' (default)'}`;
+    const holdLine = `⏳ confirm: <b>${describeConfirmHold(w.confirmHoldMs)}</b>`;
+    const repCfg = normalizeReputation(doc.settings.reputation);
+    let repLine: string | null = null;
+    if (repCfg.enabled) {
+      const st = watchReputation(all, w.id);
+      const v = evaluateReputation(st, repCfg);
+      repLine = v.judged
+        ? `🧾 reputation: <b>${Math.round(v.winRate * 100)}% win / ${v.closed} copies</b> — ${v.pass ? '✅ trusted' : repCfg.onFail === 'skip' ? 'copies skipped' : 'copied at half size'}`
+        : `🧾 reputation: ${st.closed}/${repCfg.minTrades} copies judged`;
+    }
     const text = [
       `👁 <b>${escTag(w.label)}</b>`,
       `Address: <code>${w.address}</code>`,
@@ -565,12 +586,14 @@ export class KachiBot {
       buyLine,
       exitLine,
       sizeLine,
+      holdLine,
+      repLine,
       perf,
     ].filter(Boolean).join('\n');
     const kb = this.kb([
       row(B(w.paused ? '▶️ resume' : '⏸ pause', `wv:${w.id}:pause`), B('🗑 remove', `wv:${w.id}:remove`)),
       row(B('💸 exit rule', `ex:${w.id}:menu`), B('💰 buy size', `bs:${w.id}:menu`)),
-      row(B('🔙 Watchlist', 'm:watch')),
+      row(B('⏳ confirm hold', `cw:${w.id}:menu`), B('🔙 Watchlist', 'm:watch')),
     ]);
     await this.answer(ctx, text, { kb });
   }
@@ -643,6 +666,32 @@ export class KachiBot {
       `📊 % — copy a percentage of what this wallet spends (budget still capped by your per-trade cap)`,
       '',
       'Only changes what you spend for coins copied from this wallet.',
+    ].join('\n');
+    await this.answer(ctx, text, { kb: this.kb(kbRows) });
+  }
+
+  /** per-wallet confirm-hold delay: cw:<watchId>:<seconds|menu|custom> */
+  private async showConfirmMenu(ctx: Context, watchId: string): Promise<void> {
+    const doc = await this.docFor(this.uid(ctx));
+    const w = doc.watched.find((x) => x.id === watchId);
+    if (!w) { await ctx.reply('target gone', HTML); return; }
+    const cur = Number(w.confirmHoldMs || 0);
+    const mark = (sec: number): string => (Math.round(cur / 1000) === sec ? ' ✅' : '');
+    const kbRows: BtnRow[] = [
+      row(B(`⚡ copy instantly${mark(0)}`, `cw:${watchId}:0`)),
+      row(B(`⏱ wait 15s${mark(15)}`, `cw:${watchId}:15`), B(`⏱ wait 30s${mark(30)}`, `cw:${watchId}:30`), B(`⏱ wait 60s${mark(60)}`, `cw:${watchId}:60`)),
+      row(B('✏️ custom seconds', `cw:${watchId}:custom`)),
+      row(B('🔙 Target', `wv:${watchId}`)),
+    ];
+    const text = [
+      `⏳ <b>CONFIRM HOLD</b> — for ${escTag(w.label)}`,
+      '',
+      `current: <b>${describeConfirmHold(cur)}</b>`,
+      '',
+      '⚡ instant — copy the second they buy (best entry price)',
+      '⏱ wait — copy only if they are still holding after the delay, and skip them if they dumped ≥50% in that window',
+      '',
+      'Waiting filters out apes who buy and dump within seconds — but on a coin that runs you will enter later and higher. Off by default.',
     ].join('\n');
     await this.answer(ctx, text, { kb: this.kb(kbRows) });
   }
@@ -824,6 +873,22 @@ export class KachiBot {
       await this.cbText(ctx, `break-even stop ${doc.settings.breakEvenStop ? 'ON' : 'OFF'}`);
       await this.showSettings(ctx);
     });
+    on('s:rep', async (ctx) => {
+      const doc = await this.docFor(this.uid(ctx));
+      const r = normalizeReputation(doc.settings.reputation);
+      doc.settings.reputation = { ...r, enabled: !r.enabled };
+      await this.saveDoc(doc);
+      await this.cbText(ctx, `reputation filter ${doc.settings.reputation.enabled ? 'ON' : 'OFF'}`);
+      await this.showSettings(ctx);
+    });
+    on('s:repfail', async (ctx) => {
+      const doc = await this.docFor(this.uid(ctx));
+      const r = normalizeReputation(doc.settings.reputation);
+      doc.settings.reputation = { ...r, onFail: r.onFail === 'skip' ? 'halve' : 'skip' };
+      await this.saveDoc(doc);
+      await this.cbText(ctx, `weak apes → ${doc.settings.reputation.onFail === 'skip' ? 'skipped' : 'halved'}`);
+      await this.showSettings(ctx);
+    });
     on('s:exit', async (ctx) => {
       await this.showExitMenu(ctx, 'g');
     });
@@ -897,6 +962,26 @@ export class KachiBot {
       this.pending.set(this.uid(ctx), { expect: `bsval:${watchId}:${action}` });
       await this.cbText(ctx, 'enter value');
       await this.answer(ctx, `💰 <b>BUY SIZE</b>\n\n${prompts[action] || 'Type the new value'}\n\n(or /cancel)`);
+    });
+
+    // per-wallet confirm-hold delay
+    on('cw', async (ctx, rest) => {
+      const [watchId, action] = rest.split(':');
+      const doc = await this.docFor(this.uid(ctx));
+      const w = doc.watched.find((x) => x.id === watchId);
+      if (!w) { await ctx.reply('target gone', HTML); return; }
+      if (action === 'menu') { await this.showConfirmMenu(ctx, watchId); return; }
+      if (action === 'custom') {
+        this.pending.set(this.uid(ctx), { expect: `cwval:${watchId}` });
+        await this.cbText(ctx, 'enter seconds');
+        await this.answer(ctx, '⏳ <b>CONFIRM HOLD</b>\n\nType how many seconds to wait before copying (5–600), e.g. 45\n\n(or /cancel)');
+        return;
+      }
+      const sec = Number(action);
+      w.confirmHoldMs = Number.isFinite(sec) && sec > 0 ? Math.round(sec * 1000) : null;
+      await this.saveDoc(doc);
+      await this.cbText(ctx, describeConfirmHold(w.confirmHoldMs));
+      await this.showConfirmMenu(ctx, watchId);
     });
 
     // wallet
@@ -1130,6 +1215,22 @@ export class KachiBot {
           await this.saveDoc(doc);
           await ctx.reply(`✅ <b>${res.applied}</b>`, HTML);
           await this.showSettings(ctx);
+          return;
+        }
+        if (stage.expect.startsWith('cwval:')) {
+          const watchId = stage.expect.slice(6);
+          const w = doc.watched.find((x) => x.id === watchId);
+          if (!w) { await ctx.reply('target gone', HTML); return; }
+          const sec = Number(text.trim());
+          if (!Number.isFinite(sec) || sec < 5 || sec > 600) {
+            await ctx.reply('❌ enter seconds between 5 and 600 — try again or /cancel.', HTML);
+            this.pending.set(userId, stage);
+            return;
+          }
+          w.confirmHoldMs = Math.round(sec * 1000);
+          await this.saveDoc(doc);
+          await ctx.reply(`✅ ${escTag(w.label)}: <b>${describeConfirmHold(w.confirmHoldMs)}</b>`, HTML);
+          await this.watchDetail(ctx, watchId);
           return;
         }
         if (stage.expect.startsWith('bsval:')) {

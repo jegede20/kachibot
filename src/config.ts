@@ -99,6 +99,8 @@ export const DEFAULT_SETTINGS = {
   maxHoldMs: null as number | null,
   /** warn (once) when the trading wallet drops under this; 0 = off */
   lowBalanceWarnLamports: 20_000_000, // 0.02 SOL
+  /** reputation filter — off until the user arms it */
+  reputation: { enabled: false, minTrades: 10, minWinRate: 0.3, onFail: 'skip' as const },
   minSpendLamports: 100_000, // ignore watched buys smaller than this
   maxSpendLamports: 100_000_000_000, // ignore watched buys bigger than this (lamports)
   dailyCapLamports: 500_000_000, // 0.5 SOL / day per user

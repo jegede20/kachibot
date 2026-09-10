@@ -107,6 +107,8 @@ Example: mode **%**, copy **20%**, wallet buys 0.5 SOL → you buy 0.1 SOL.
 | **🎗 break-even stop** | After your **first** take-profit rung banks profit, the stop on the remaining bag moves up to break-even — the trade can no longer end in a loss. | ON | toggle |
 | **⏳ Max hold (hours)** | Auto-exit any position older than this, whatever the price (`0` = off). | off | 0 – 720 |
 | **⚠️ Low balance alert (SOL)** | Warns you (at most once every 6h) when your wallet dips below this, *before* a watched wallet apes and the copy gets blocked. `0` = off. | 0.02 | 0 – 100 |
+| **🧾 Judge ape after N copies** | Reputation filter: don't form an opinion until the wallet has this many closed copies (protects new wallets from being judged on 2 unlucky trades). | 10 | 1 – 100 |
+| **📉 Min ape win rate %** | Reputation filter: the win-rate floor. A wallet below it is treated as weak and your *bad ape* action applies. | 30 | 0 – 100 |
 | **📏 Min-spend filter (SOL)** | Ignores watched-wallet buys *smaller* than this. | 0.0001 | 0.00001 – 100 |
 | **📏 Max-spend filter (SOL)** | Ignores watched-wallet buys *bigger* than this. | 100 SOL (effectively off) | 0.0001 – 5000 |
 | **🪫 Per-trade cap (SOL)** | Hard ceiling for a single copy-buy, whatever the mode says. | 0.05 SOL | 0.0001 – 10 |
@@ -125,6 +127,14 @@ Example: mode **%**, copy **20%**, wallet buys 0.5 SOL → you buy 0.1 SOL.
 > **A practical starting point:** fixed mode, 0.02–0.05 SOL per buy, slippage 25%, TP ladder `2,3`, stop-loss -50%, caps that match your budget. Copy-buys land *after* the wallet you follow — that's the nature of copy trading: they set the pace, you ride the move.
 
 ---
+
+### Trust rules — reputation filter & confirm-hold
+
+**👤 Reputation filter** (⚙️ Settings → `👤 reputation`) judges each watched wallet **by its own track record** — the closed copies it produced for you (win rate over N copies). A wallet under your floor is either **skipped** or **copied at half size** (`🧾 weak ape → SKIP / HALVE`). It never judges a wallet before it has *N* closed copies, so new targets are never blocked early. Each watch card shows where that wallet stands: `🧾 reputation: 22% win / 14 copies — copies skipped`. **This costs you no entry delay** — the judgement uses history, not waiting.
+
+**⏳ Confirm hold** (👀 Watchlist → tap a wallet → `⏳ confirm hold`) is the opposite trade-off. Set a per-wallet wait (15s / 30s / 60s / custom): KACHIBOT waits, checks the ape still holds their tokens, and **only then** copies. If they dumped ≥50% inside the window, the copy is skipped. Off by default.
+
+> **Which to use?** The reputation filter is free protection — turn it on once you have ~10 closed copies per wallet. Confirm-hold is a per-ape safety switch: use it on a wallet you don't trust to hold, leave it off for wallets whose speed *is* the edge — waiting 30s on a runner means entering much higher.
 
 ### Exit rules (💸) — how each copied position is closed
 

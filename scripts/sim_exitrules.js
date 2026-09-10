@@ -162,6 +162,83 @@ const ev = { userId: 1, watchId: 'w1', watchedAddress: 'A', watchedLabel: 'ape #
   await trader.checkLowBalance({ ...doc, watched: [] });
   console.log('  user with an empty watchlist             →', notices.length ? 'unexpected message' : 'silent');
 
+  console.log('\n=== E. reputation filter (no entry delay) ===');
+  const pumpMod = D('chain/pump');
+  pumpMod.curvePhase = async () => 'curve';
+  const connMod2 = D('chain/conn');
+  connMod2.getConnection = () => ({ getBalance: async () => 1_000_000_000 });
+
+  const { encryptSecret: enc2 } = D('crypto');
+  const bs58b = require('bs58');
+  const b58b = (buf) => (bs58b.encode ? bs58b.encode(buf) : bs58b.default.encode(buf));
+  const { Keypair: KP2 } = require('@solana/web3.js');
+  const key2 = KP2.generate();
+
+  const mkTrade = (watchId, pnl) => ({
+    ...openRow(), id: `x-${Math.random()}`, watchId, status: 'closed',
+    pnlLamports: pnl, pnlPct: pnl / 1e8, exitReason: 'TP',
+  });
+  // a wallet with a 10% win rate over 10 closed copies
+  const badRows = [mkTrade('w1', 1e8), ...Array(9).fill(0).map(() => mkTrade('w1', -1e8))];
+
+  const APE2 = KP2.generate().publicKey.toBase58();
+  const buyDoc = (rep) => {
+    const st = defaultSettings();
+    st.honeypotCheck = false;
+    st.alerts.activity = true;
+    st.reputation = rep;
+    return {
+      userId: 1, settings: st, secret: enc2(b58b(key2.secretKey)), wallets: [], activeWalletId: null,
+      pinHash: null, watched: [{ id: 'w1', address: 'A', label: 'ape #1', source: 'address', addedAt: Date.now(), paused: false }],
+      createdAt: Date.now(), lastSeenAt: Date.now(), welcomed: true, daySpend: null,
+    };
+  };
+  const MINT2 = KP2.generate().publicKey.toBase58();
+  const buyEv = { ...ev, side: 'buy', mint: MINT2, watchedAddress: APE2, tokenAmountRaw: '1000', spendLamports: 100_000_000, spentSolLamports: 100_000_000 };
+  const buys = [];
+  trader.executeBuy = async (doc, e, budget, route) => { buys.push(`BUY ${(budget / 1e9).toFixed(4)} SOL via ${route}`); return null; };
+
+  const runBuy = async (rep) => {
+    buys.length = 0; notices.length = 0;
+    const doc = buyDoc(rep);
+    trader.store = {
+      listTrades: async () => badRows,
+      getUser: async () => doc,
+      putTrade: async () => {},
+    };
+    await trader.handleWatchedBuy(doc, buyEv);
+    return buys.join(', ') || (notices.length ? 'SKIPPED: ' + notices[0].replace(/<[^>]+>/g, '').split('\n')[0] : 'no action');
+  };
+
+  console.log('  reputation OFF                        →', await runBuy({ enabled: false, minTrades: 10, minWinRate: 0.3, onFail: 'skip' }));
+  console.log('  ON, ape 10% win / 10 copies, → skip   →', await runBuy({ enabled: true, minTrades: 10, minWinRate: 0.3, onFail: 'skip' }));
+  console.log('  ON, same ape, → halve size           →', await runBuy({ enabled: true, minTrades: 10, minWinRate: 0.3, onFail: 'halve' }));
+  console.log('  ON, floor lowered to 5%              →', await runBuy({ enabled: true, minTrades: 10, minWinRate: 0.05, onFail: 'skip' }));
+
+  console.log('\n=== F. confirm-hold delay ===');
+  const holdDoc = (ms) => {
+    const d = buyDoc({ enabled: false, minTrades: 10, minWinRate: 0.3, onFail: 'skip' });
+    d.watched[0].confirmHoldMs = ms;
+    return d;
+  };
+  const runHold = async (ms, balanceFn) => {
+    buys.length = 0; notices.length = 0;
+    const doc = holdDoc(ms);
+    trader.store = { listTrades: async () => [], getUser: async () => doc, putTrade: async () => {} };
+    trader.tokenBalanceOf = balanceFn;
+    trader.pendingConfirms = new Set();
+    await trader.handleWatchedBuy(doc, buyEv);
+    const immediate = buys.length ? 'copied instantly' : 'waiting…';
+    await new Promise((r) => setTimeout(r, ms + 700));
+    const after = buys.length ? buys.join(', ') : (notices.length ? notices[notices.length - 1].replace(/<[^>]+>/g, '').split('\n')[0] : 'nothing');
+    return `${immediate} → ${after}`;
+  };
+  console.log('  off (0ms)                             →', await runHold(0, async () => 1000n));
+  console.log('  150ms delay, ape still holds          →', await runHold(150, async () => 1000n));
+  console.log('  150ms delay, ape dumped everything    →', await runHold(150, async () => 0n));
+  console.log('  150ms delay, ape sold 30% (under 50%) →', await runHold(150, async () => 700n));
+  console.log('  150ms delay, balance check fails      →', await runHold(150, async () => { throw new Error('rpc down'); }), '(fails open)');
+
   console.log('\nAll simulations ran against stubs — no chain calls, no real trades.');
 })();
 
