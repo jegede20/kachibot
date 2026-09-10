@@ -1,6 +1,6 @@
 # KACHIBOT — User Guide
 
-**KACHIBOT** is a Telegram bot (`@TexSnipeBot`) that watches other Solana wallets for you. Add a wallet you want to follow, and every time that wallet **buys** a token, KACHIBOT **buys the same token for you**, using the money in *your* bot wallet. It can then sell for you automatically — at your chosen profit targets or when the wallet you follow sells. Every finished trade gets a simple scorecard.
+**KACHIBOT** is a Telegram bot (`@TexSnipeBot`) that watches other Solana wallets for you. Add a wallet you want to follow, and every time that wallet **buys** a token, KACHIBOT **buys the same token for you**, using the money in *your* bot wallet. It can then sell for you automatically — at your chosen profit targets, at your own rules, or when the wallet you follow sells. Every finished trade gets a simple scorecard.
 
 No web app. Everything happens inside this Telegram chat, with buttons.
 
@@ -86,7 +86,7 @@ Sending costs a tiny network fee, paid from your wallet (a fraction of a cent).
 
 ## 2. Settings (⚙️)
 
-Tap **⚙️ Settings** to see your current setup and change any value by tapping its button and typing the new number. Everything below uses the values exactly as they appear on the buttons.
+Tap **⚙️ Settings** to see your current setup. Tap any row to type a new value; tap a toggle button to switch it on/off. Everything below uses the values exactly as they appear in the app.
 
 ### How big your copy-buys are
 | Setting | What it does | Default | Allowed |
@@ -97,68 +97,45 @@ Tap **⚙️ Settings** to see your current setup and change any value by tappin
 
 Example: mode **%**, copy **20%**, wallet buys 0.5 SOL → you buy 0.1 SOL.
 
+> Each watched wallet can also have **its own** size — see **💰 buy size** in §3.
+
 ### Buying behaviour
 | Setting | What it does | Default | Allowed |
 |---|---|---|---|
 | **💧 Slippage %** | How much price may move between the moment a buy is spotted and your buy landing, before the bot gives up. Meme coins move fast — 25% is normal here. | 25% | 1% – 100% |
 | **⚡ Fee cap per tx (SOL)** | Most the bot may pay in network fees (priority/tip) for one transaction. Higher = your buy lands faster. | 0.001 SOL | 0.00001 – 0.2 |
-| **📈 Trail arm at (X)** | Trailing stop: the multiple at which trailing **starts** (e.g. `3x`). Once a position reaches it, KACHIBOT remembers the peak and sells if price gives back your *Trail back %*. Off until you set it. | 3x | 1.05 – 1000 |
-| **📉 Trail back %** | How far the price may fall back from the peak before trailing sells (e.g. `25` = sell after giving back 25% of the peak). | 25 | 1 – 90 |
-| **🎗 break-even stop** | After your **first** take-profit rung banks profit, the stop on the remaining bag moves up to break-even — the trade can no longer end in a loss. | ON | toggle |
-| **⏳ Max hold (hours)** | Auto-exit any position older than this, whatever the price (`0` = off). | off | 0 – 720 |
-| **⚠️ Low balance alert (SOL)** | Warns you (at most once every 6h) when your wallet dips below this, *before* a watched wallet apes and the copy gets blocked. `0` = off. | 0.02 | 0 – 100 |
-| **🧾 Judge ape after N copies** | Reputation filter: don't form an opinion until the wallet has this many closed copies (protects new wallets from being judged on 2 unlucky trades). | 10 | 1 – 100 |
-| **📉 Min ape win rate %** | Reputation filter: the win-rate floor. A wallet below it is treated as weak and your *bad ape* action applies. | 30 | 0 – 100 |
 | **📏 Min-spend filter (SOL)** | Ignores watched-wallet buys *smaller* than this. | 0.0001 | 0.00001 – 100 |
 | **📏 Max-spend filter (SOL)** | Ignores watched-wallet buys *bigger* than this. | 100 SOL (effectively off) | 0.0001 – 5000 |
 | **🪫 Per-trade cap (SOL)** | Hard ceiling for a single copy-buy, whatever the mode says. | 0.05 SOL | 0.0001 – 10 |
 | **🪫 Daily spend cap (SOL)** | Hard ceiling on all copy-buys in one day. Resets daily. | 0.5 SOL/day | 0.001 – 100 |
 | **⏱ Watch cooldown (seconds)** | Minimum gap between two copy-buys from the same watched wallet. | 10s | 1 – 600 |
+| **🛡 honeypot check** | Before buying, the bot tests the token's contract for traps (can't-sell scams, blacklists) and rejects bad ones. Keep it ON. | ON | toggle |
+
+### Protection & trust
+| Setting | What it does | Default | Allowed |
+|---|---|---|---|
+| **📈 Trail arm at (X)** | Trailing stop: the multiple at which trailing **starts** (e.g. `3x`). Once a position reaches it, KACHIBOT remembers the peak and sells if price gives back your *Trail back %*. | off until set (3x when on) | 1.05 – 1000 |
+| **📉 Trail back %** | How far the price may fall back from the peak before the trailing stop sells (`25` = sell after giving back 25% of the peak). | 25 | 1 – 90 |
+| **🎏 trailing** (toggle) | Switches the trailing stop on/off. | OFF | toggle |
+| **🎗 break-even stop** | After your **first** take-profit rung banks profit, the stop on the remaining bag moves up to break-even — the trade can no longer end in a loss. | ON | toggle |
+| **⏳ Max hold (hours)** | Auto-exit any position older than this, whatever the price (`0` = off). | off | 0 – 720 |
+| **⚠️ Low balance alert (SOL)** | Warns you (at most once every 6h) when your wallet dips below this, *before* a watched wallet apes and the copy gets blocked. `0` = off. | 0.02 SOL | 0 – 100 |
+| **🧾 Judge ape after N copies** | Reputation filter: don't form an opinion until the wallet has this many closed copies — stops a good wallet being judged on two unlucky trades. | 10 | 1 – 100 |
+| **📉 Min ape win rate %** | Reputation filter: the win-rate floor. A wallet below it is treated as weak and your *weak ape* action applies. | 30 | 0 – 100 |
+| **👤 reputation** (toggle) | Switches the reputation filter on/off (see §4). | OFF | toggle |
+| **🧾 weak ape → SKIP / HALVE** | What to do with a wallet below your win-rate floor: copy nothing, or copy at half size. | SKIP | tap to toggle |
 
 ### When to sell
 | Setting | What it does | Default | Allowed |
 |---|---|---|---|
-| **🎯 TP ladder (e.g. 2x,3x,5x or more)** | Take-profit steps, as multiples of your buy price. Type them however you like — `2x,3x,5x`, `2,3,5` or `1.5x 4x 10x` all work. With `2x,3x`: half your position is sold at 2x (100% profit) and the other half at 3x (200% profit). Up to 5 steps; they are sorted and de-duplicated for you. | 2x, 3x | any multiples 1.01 – 1000, up to 5 |
+| **🎯 TP ladder (e.g. 2x,3x,5x or more)** | Take-profit steps, as multiples of your buy price. Type them however you like — `2x,3x,5x`, `2,3,5` or `1.5x 4x 10x` all work. With `2x,3x`: half your position is sold at 2x (100% profit) and the other half at 3x (200% profit). Up to 5 steps; they are sorted and de-duplicated for you. | 2x, 3x | any multiple 1.01 – 1000, up to 5 |
 | **🛑 Stop-loss %** | If the price falls this much, everything left is sold automatically. | -50% | 1% – 99% |
-| **👻 copy-sell** | When ON, the bot also mirrors the watched wallet's **sells** — if they dump, you dump (subject to your exit rule below). When OFF, you only follow their buys and your own TP/SL rules decide the exits. | OFF | toggle |
-| **💸 Exit rule** | How a copied position is exited. **Follow** = sell 100% the moment the ape sells · **Sell %** = sell only a slice (e.g. 50%) when it sells · **Hold** = never follow its sells (TP ladder + stop-loss still guard it) · **Sell at X** = ignore its sells and exit the whole bag at your multiple (e.g. 3x) · **Sell at mcap** = exit the whole bag when the coin reaches a market cap (e.g. 100k). Set one default for all wallets here, and/or a different rule per wallet from its watch card. | follow ape | see below |
-| **🛡 honeypot check** | Before buying, the bot tests the token's contract for traps (can't-sell scams, blacklists) and rejects bad ones. Keep it ON. | ON | toggle |
+| **👻 copy-sell** | When ON, the bot also mirrors the watched wallet's **sells** — if they dump, you dump (subject to your **exit rule**). When OFF, you only follow their buys and your own rules decide the exits. | OFF | toggle |
+| **💸 Exit rule** | How a copied position is exited: **Follow** = sell 100% the moment the ape sells · **Sell %** = sell only a slice · **Hold** = never follow its sells · **Sell at X** = exit the whole bag at your multiple · **Sell at mcap** = exit at a market cap. Set one default for all wallets here, and/or a different rule per wallet (§3). | follow ape | see §5 |
 
-> **A practical starting point:** fixed mode, 0.02–0.05 SOL per buy, slippage 25%, TP ladder `2,3`, stop-loss -50%, caps that match your budget. Copy-buys land *after* the wallet you follow — that's the nature of copy trading: they set the pace, you ride the move.
+> **A practical starting point:** fixed mode, 0.02–0.05 SOL per buy, slippage 25%, TP ladder `2x,3x`, stop-loss -50%, break-even ON, caps that match your budget. Copy-buys land *after* the wallet you follow — that's the nature of copy trading: they set the pace, you ride the move.
 
 ---
-
-### Trust rules — reputation filter & confirm-hold
-
-**👤 Reputation filter** (⚙️ Settings → `👤 reputation`) judges each watched wallet **by its own track record** — the closed copies it produced for you (win rate over N copies). A wallet under your floor is either **skipped** or **copied at half size** (`🧾 weak ape → SKIP / HALVE`). It never judges a wallet before it has *N* closed copies, so new targets are never blocked early. Each watch card shows where that wallet stands: `🧾 reputation: 22% win / 14 copies — copies skipped`. **This costs you no entry delay** — the judgement uses history, not waiting.
-
-**⏳ Confirm hold** (👀 Watchlist → tap a wallet → `⏳ confirm hold`) is the opposite trade-off. Set a per-wallet wait (15s / 30s / 60s / custom): KACHIBOT waits, checks the ape still holds their tokens, and **only then** copies. If they dumped ≥50% inside the window, the copy is skipped. Off by default.
-
-> **Which to use?** The reputation filter is free protection — turn it on once you have ~10 closed copies per wallet. Confirm-hold is a per-ape safety switch: use it on a wallet you don't trust to hold, leave it off for wallets whose speed *is* the edge — waiting 30s on a runner means entering much higher.
-
-### Exit rules (💸) — how each copied position is closed
-
-The old copy-sell was all-or-nothing: the watched wallet sold, you sold everything. Now **you choose** how each position exits.
-
-| Rule | What happens when the watched wallet sells | What happens otherwise |
-|---|---|---|
-| 👻 **Follow ape — sell all** | Your whole position is sold (classic copy-sell) | TP ladder + stop-loss still guard it |
-| 🔢 **Sell %** | Only that % of your bag is sold (e.g. 50%) — the rest stays open | TP ladder + stop-loss still guard the rest |
-| 🙌 **Hold** | Nothing — you stay in | TP ladder + stop-loss still guard it |
-| 🎯 **Sell at X** | Nothing — you stay in | Whole bag sold when it hits your multiple (e.g. 3x) |
-| 📈 **Sell at mcap** | Nothing — you stay in | Whole bag sold when the coin hits your market cap (e.g. 100k) |
-
-**Per-wallet buy size (💰)** — from a watch card tap **💰 buy size** to give that wallet its own size: a fixed SOL amount, or a % of what *that* wallet spends. Otherwise it inherits your global size. Your per-trade cap always wins.
-
-**Where to set it**
-- **⚙️ Settings → 💸 Exit rule (all wallets)** — your default for every wallet.
-- **👀 Watchlist → tap a wallet → 💸 exit rule** — override for that wallet only (a `↩️ use global default` button puts it back).
-
-**Notes that matter**
-- A rule applies to coins copied **from that wallet** from the moment you set it; open positions keep the rule they were opened with (shown on their card).
-- 🎯 and 📈 targets **replace** the TP ladder for that position — stop-loss and rug protection still apply.
-- Market caps are compared in USD, using a cached SOL price; if the price feed is unreachable for a moment the ladder keeps guarding the position until it recovers.
-- 🙌 Hold and the target rules do **not** need copy-sell to be ON — they are your own exits, not mirrors of the ape.
 
 ## 3. Watchlist (👀) — who you follow
 
@@ -170,34 +147,114 @@ Tap **👀 Watchlist** to manage targets. You can watch **several wallets at the
 - a **pump.fun coin link** — the bot follows the coin's *creator* wallet (the wallet that launches it), or
 - a **pump.fun profile link** — note: copy the *address* from the profile page; @usernames aren't supported.
 
-Each new target is labelled `ape #1`, `ape #2`… Tap a target to see:
+Each new target is labelled `ape #1`, `ape #2`… A watched wallet only triggers buys while it's **live** (not paused) and only if the buy passes your **settings** filters.
 
-- its full `Address:`,
-- ⏱ how long it's been watched and whether it's 🟢 live or ⏸ paused (with pause duration), and when its last buy was seen,
-- its performance: copies closed, win rate, average return, SOL gained or lost.
+### The target card
 
-Buttons on a target:
-- **⏸ pause / ▶️ resume** — stop or restart copying this wallet without removing it.
-- **🗑 remove** — stop watching it.
+Tap a target to see its card, for example:
 
-A watched wallet only triggers buys while it's **live** (not paused) and only if the buy passes your **settings** filters.
+```
+👁 ape #1
+Address: CcJX97…
+source: pump.fun link
+⏱ watching for 2d 3h · 🟢 live          (or ⏸ paused for 1h · watched 2d total)
+🕓 last buy seen 12m ago
+💸 exit: follow ape — sell all (default)
+💰 size: 0.0050 SOL fixed (default)
+⏳ confirm: copy instantly
+🧾 reputation: 22% win / 14 copies — copies skipped
+📊 copies closed: 9 · win rate 44% · avg return +18% · realized +0.041 SOL
+```
+
+- **🟢 live / ⏸ paused** — whether it is being copied right now, and for how long.
+- **🕓 last buy seen** — when this wallet last bought anything on-chain (it buys often, even if you don't copy it).
+- **💸 exit / 💰 size / ⏳ confirm** — this wallet's own rules; `(default)` means it inherits your global setting.
+- **🧾 reputation** — only shown when the reputation filter is on (§4).
+- **📊 performance** — win rate, average return and realized SOL from copies of *this* wallet.
+
+### Per-wallet controls
+
+| Button | What it sets | Options |
+|---|---|---|
+| **💸 exit rule** | How positions copied from this wallet are closed (§5) | follow / sell % / hold / sell at X / sell at mcap / use global default |
+| **💰 buy size** | How much to spend per copy from this wallet | fixed SOL / % of this ape's spend / use global default |
+| **⏳ confirm hold** | Wait and verify the ape still holds before copying (§4) | instant / 15s / 30s / 60s / custom (5–600s) |
+| **⏸ pause / ▶️ resume** | Stop or restart copying this wallet without removing it | — |
+| **🗑 remove** | Stop watching it | — |
+
+Your **per-trade cap** always wins over any buy size, and a rule only applies to coins copied *from that wallet* from the moment you set it — open positions keep the rule they were opened with.
 
 ---
 
-## 4. What happens when they buy (and who sells for you)
+## 4. Trust rules — reputation filter & confirm-hold
 
-1. The watcher spots a buy from a wallet you follow.
-2. Checks run against your settings: min/max spend filters, caps, cooldown, honeypot/sim check, enough SOL in your wallet.
-3. If everything passes, KACHIBOT buys the same token for you (on the bonding curve, or via a DEX route if the coin already graduated off it) and a **position** is opened.
-4. Then it manages the exit:
-   - **TP ladder** sells portions as price hits each multiple;
+Two tools decide **whether to trust an ape at all**. They solve the same problem in opposite ways: one uses history (free), one uses waiting (costs entry price).
+
+### 👤 Reputation filter — judge by track record (no delay)
+⚙️ **Settings → 👤 reputation**
+
+Once a wallet has **N closed copies** (default 10), KACHIBOT looks at the win rate of the trades that wallet produced for you. Below your floor (default 30%), the wallet is treated as weak and either **skipped** or **copied at half size** (`🧾 weak ape → SKIP / HALVE`).
+
+- It **never blocks a new wallet** — a target with 9 closed copies is always trusted.
+- Open positions and other wallets never count towards a wallet's record.
+- Skips are always explained: *"🧾 SKIPPED — WEAK APE — ape #3 is at 18% win rate over 12 copies, below your 30% floor. No funds spent."*
+- **Costs you nothing in speed** — the judgement comes from history, not from waiting.
+
+### ⏳ Confirm hold — wait and check (per wallet, off by default)
+👀 **Watchlist → tap a wallet → ⏳ confirm hold**
+
+KACHIBOT waits your chosen delay after the ape buys, checks on-chain that they **still hold** their tokens, and only then copies. If they dumped **≥50%** inside the window, the copy is skipped:
+
+> *"🚫 SKIPPED — INSTANT DUMP — ape #2 sold 100% of their Coin ($SYM) within 30s of buying. Nothing copied."*
+
+- Presets: **15s / 30s / 60s**, or any custom value from **5 to 600** seconds.
+- A small trim (say 30%) is **not** treated as a dump — only ≥50% is.
+- If the balance check can't be made (network hiccup), the bot **copies anyway** — a bad RPC should never cost you a trade.
+- Pending waits live in memory: if the bot restarts mid-wait, that copy is simply dropped. Nothing is ever bought late at a stale price.
+
+> **Which should you use?** Turn the **reputation filter** on once each wallet has ~10 closed copies — it's free protection. Use **confirm hold** surgically, only on a wallet you don't trust to hold: on a coin that runs, waiting 30 seconds means entering much higher. Leave it off for apes whose speed *is* the edge.
+
+---
+
+## 5. Exit rules (💸) — how each copied position is closed
+
+Copy-sell used to be all-or-nothing: the watched wallet sold, you sold everything. Now **you choose** how each position exits.
+
+| Rule | When the watched wallet sells | Otherwise |
+|---|---|---|
+| 👻 **Follow ape — sell all** | Your whole position is sold (classic copy-sell) | TP ladder + stop-loss still guard it |
+| 🔢 **Sell %** | Only that % of your bag is sold (e.g. 50%) — the rest stays open | TP ladder + stop-loss still guard the rest |
+| 🙌 **Hold** | Nothing — you stay in | TP ladder + stop-loss still guard it |
+| 🎯 **Sell at X** | Nothing — you stay in | Whole bag sold when it hits your multiple (e.g. 3x) |
+| 📈 **Sell at mcap** | Nothing — you stay in | Whole bag sold when the coin hits your market cap (e.g. 100k) |
+
+**Where to set it**
+- **⚙️ Settings → 💸 Exit rule (all wallets)** — your default for every wallet.
+- **👀 Watchlist → tap a wallet → 💸 exit rule** — override for that wallet only (`↩️ use global default` puts it back).
+
+**Notes that matter**
+- A rule applies to coins copied **from that wallet** from the moment you set it; open positions keep the rule they were opened with.
+- 🎯 and 📈 targets **replace** the TP ladder for that position — stop-loss, trailing and rug protection still apply.
+- Market caps are compared in **USD** using a cached SOL price; if the price feed is unreachable for a moment, the ladder keeps guarding the position until it recovers.
+- 🙌 Hold and the target rules do **not** need copy-sell to be ON — they are your own exits, not mirrors of the ape.
+
+---
+
+## 6. What happens when they buy
+
+1. The watcher spots a buy from a wallet you follow (and names the coin in full, with the exact SOL that wallet spent).
+2. Trust checks: **reputation filter** (skip/halve a weak ape) and **confirm hold** (wait and verify they still hold).
+3. Settings checks: min/max spend filters, caps, cooldown, honeypot/sim check, enough SOL in your wallet.
+4. If everything passes, KACHIBOT buys the same token for you — on the bonding curve, or via a DEX route if the coin already graduated off it — and a **position** opens.
+5. Then it manages the exit automatically:
    - **trailing stop** (if armed) sells when price gives back your % from the peak;
-   - **break-even stop** protects the rest once the first rung banked profit;
+   - **break-even stop** protects the remainder once the first rung banked profit;
    - **max hold time** exits anything older than your limit;
-   - **Stop-loss** sells everything if price drops to your limit;
-   - **copy-sell** (if ON) sells when the watched wallet sells — following your **exit rule** (sell all, a %, or nothing);
+   - **stop-loss** sells everything if price drops to your limit;
+   - **TP ladder** sells portions as price hits each multiple;
+   - **copy-sell** (if ON) follows your **exit rule** — sell all, a %, or nothing;
    - a **rug guard** watches for liquidity pulls/scams and bails out if detected.
-5. When the position is fully closed you get a **trade card**: bought, sold, PnL in SOL and %, how long it was held, and why it exited (TP / stop-loss / copy-sell / rug / manual).
+6. When the position is fully closed you get a **trade card**: bought, sold, PnL in SOL and %, how long it was held, and why it exited (TP / trailing / stop-loss / copy-sell / max hold / rug / manual).
 
 ### Screens
 | Screen | Button / command | Shows |
@@ -207,17 +264,19 @@ A watched wallet only triggers buys while it's **live** (not paused) and only if
 | **🔔 Alerts** | Main → 🔔 Alerts | What messages the bot sends: **🎯 snipes** = copy-buy outcome cards (locked / failed / dodged) — off means it buys silently; **💸 sells** = TP-step sells and closed-trade scorecards; **👁 activity** = radar notes on wallets you watch (off by default). Protection warnings (blocks, rug sweeps, caps) always reach you. Every alert names the coin in full (name + ticker) and shows the exact SOL the watched wallet spent. Each is a simple on/off toggle. |
 | **🧯 Panic sell-all** | Main → 🧯 Panic | Dumps *every* open position right now. Asks for your PIN (or a `yes` if no PIN is set). Use it when you want out of everything instantly. |
 
-A **failed** buy stays in History with the reason — common ones:
+A **failed** or **skipped** buy stays in History with the reason — common ones:
 
 - *slippage too tight* — price moved more than your Slippage % before the buy landed;
 - *cap hit* — per-trade or daily cap reached;
 - *honeypot / rug detected* — the bot's protection rejected the token;
-- *wallet empty* — no SOL left for the buy + fee;
-- *cooldown* — this wallet bought again too soon after the last copy.
+- *wallet empty* — no SOL left for the buy + fee (you'll also get a **⚠️ LOW BALANCE** heads-up before this happens);
+- *cooldown* — this wallet bought again too soon after the last copy;
+- *weak ape* — the reputation filter skipped a wallet below your win-rate floor;
+- *instant dump* — confirm-hold caught the ape selling ≥50% within the wait window.
 
 ---
 
-## 5. All commands
+## 7. All commands
 
 | Command | What it does |
 |---|---|
@@ -239,7 +298,7 @@ Tip: any plain message with no command in progress opens the main screen.
 
 ---
 
-## 6. Money, fees, safety
+## 8. Money, fees, safety
 
 - **The bot is free** and takes no fee or commission on your trades. The only costs are the **SOL network fees** and the **trades themselves**, all paid from your wallet.
 - Only fund the bot wallet with money you're willing to lose on meme-coin copy trades. Copy trading is **not financial advice** — it is high-risk, fast-moving speculation. Start small.
@@ -250,13 +309,28 @@ Tip: any plain message with no command in progress opens the main screen.
 
 ---
 
-## 7. Troubleshooting
+## 9. Troubleshooting
 
 **Balance still ◎0 after a deposit?**
 Tap **⟳ Refresh**. If it's still 0, check the deposit transaction on the solscan link from the Receive screen — most likely the SOL was sent on the wrong network (must be **Solana**, not BNB/Ethereum/other).
 
 **The watched wallet bought but I didn't?**
-Check, in order: is the target **paused**? Is the buy above your **min-spend** and below **max-spend**? Did a **cap** run out (daily cap resets daily)? Was it inside the **cooldown** window? Does the wallet hold enough **SOL**? Is **honeypot check** ON and rejecting it? Any rejection shows in **History** with the reason.
+Check, in order:
+
+1. Is the target **paused**?
+2. Did the **reputation filter** skip it (wallet below your win-rate floor)?
+3. Did **confirm hold** catch the ape dumping inside the wait window?
+4. Is the buy above your **min-spend** and below **max-spend**?
+5. Did a **cap** run out (daily cap resets daily) or was it inside the **cooldown** window?
+6. Does the wallet hold enough **SOL**? Is **honeypot check** rejecting it?
+
+Every skip and rejection is recorded in **History** with its reason.
+
+**I keep getting ⛔ SNIPE BLOCKED.**
+Your wallet doesn't have enough SOL for the copy + fee + buffer. The message tells you exactly how much you need. Fund the wallet — and watch for the **⚠️ LOW BALANCE** warning that fires *before* the next ape buys.
+
+**My position hasn't sold even though it's in profit.**
+Check which exit applies: with a **🎯 Sell at X** or **📈 Sell at mcap** rule, the ape selling is not a signal — the position waits for *your* target. With **🙌 Hold**, only your TP ladder, trailing stop, stop-loss or max-hold time will close it. You can always sell manually from **📡 Positions**.
 
 **Send failed?**
 The destination must be a valid Solana address and your balance must cover amount + network fee. Confirmed sends can't be reversed.
@@ -272,4 +346,4 @@ Reinstall Telegram, sign back in, and open the bot. Your wallets and history are
 
 ---
 
-*Short words used above: **SOL** — Solana's coin. **Slippage** — how much extra price you accept to get the buy through. **TP** — take-profit. **SL** — stop-loss. **Honeypot** — a token you can buy but never sell. **Rug** — developers pull the money and the price collapses. **Bonding curve** — the automated price ladder pump.fun coins use before they "graduate" to open trading.*
+*Short words used above: **SOL** — Solana's coin. **Slippage** — how much extra price you accept to get the buy through. **TP** — take-profit. **SL** — stop-loss. **Ape** — a trader you copy. **Honeypot** — a token you can buy but never sell. **Rug** — developers pull the money and the price collapses. **Bonding curve** — the automated price ladder pump.fun coins use before they "graduate" to open trading. **mcap** — market cap, the coin's total value. **Trailing stop** — a stop that follows the price up and only sells when it falls back by your chosen amount. **Break-even** — the price at which you neither win nor lose.*
