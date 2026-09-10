@@ -91,6 +91,14 @@ export const DEFAULT_SETTINGS = {
   stopLossPct: 0.5, // sell everything at -50%
   copySell: false,
   exit: { mode: 'follow' as const, pct: 1, mult: null, mcapUsd: null },
+  /** trailing stop: off by default; the user arms it from the settings menu */
+  trailing: { enabled: false, armAtMult: 3, trailPct: 0.25 },
+  /** move the stop to break-even once the first TP rung has banked profit */
+  breakEvenStop: true,
+  /** auto-exit after this long (null = never) */
+  maxHoldMs: null as number | null,
+  /** warn (once) when the trading wallet drops under this; 0 = off */
+  lowBalanceWarnLamports: 20_000_000, // 0.02 SOL
   minSpendLamports: 100_000, // ignore watched buys smaller than this
   maxSpendLamports: 100_000_000_000, // ignore watched buys bigger than this (lamports)
   dailyCapLamports: 500_000_000, // 0.5 SOL / day per user

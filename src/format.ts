@@ -131,6 +131,8 @@ export function exitReasonLabel(r: string | null | undefined): string {
     case 'MANUAL': return '✋ manual sell';
     case 'PANIC': return '🚨 panic sell-all';
     case 'RUG': return '🧨 rug detected';
+    case 'TRAIL': return '🎏 trailing stop';
+    case 'TIME': return '⏳ max hold time';
     case 'ERROR': return '⚠️ error close';
     case 'CANCELLED': return '🚫 cancelled';
     default: return '—';

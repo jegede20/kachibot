@@ -9,7 +9,7 @@
  */
 import fs from 'node:fs';
 import { SUPABASE_URL, SUPABASE_KEY, DB_FILE, DATA_DIR } from './config';
-import { UserDoc, TradeRow, freshUser } from './types';
+import { UserDoc, TradeRow, freshUser, ensureSettings } from './types';
 
 export interface Store {
   getUser(userId: number): Promise<UserDoc>;
@@ -186,6 +186,7 @@ class SupabaseStore implements Store {
         return fresh;
       }
       const doc = data.doc as UserDoc;
+      ensureSettings(doc.settings);
       this.userCache.set(key, doc);
       return doc;
     })();
@@ -197,7 +198,7 @@ class SupabaseStore implements Store {
     const { data, error } = await this.sb.from('kachi_users').select('doc').limit(500);
     if (error) { this.tableHint(error); throw error; }
     const users = (data || []).map((r: SbRow) => r.doc as UserDoc);
-    for (const u of users) this.userCache.set(String(u.userId), u);
+    for (const u of users) { ensureSettings(u.settings); this.userCache.set(String(u.userId), u); }
     return users;
   }
   async saveUser(doc: UserDoc): Promise<void> {

@@ -102,6 +102,11 @@ Example: mode **%**, copy **20%**, wallet buys 0.5 SOL → you buy 0.1 SOL.
 |---|---|---|---|
 | **💧 Slippage %** | How much price may move between the moment a buy is spotted and your buy landing, before the bot gives up. Meme coins move fast — 25% is normal here. | 25% | 1% – 100% |
 | **⚡ Fee cap per tx (SOL)** | Most the bot may pay in network fees (priority/tip) for one transaction. Higher = your buy lands faster. | 0.001 SOL | 0.00001 – 0.2 |
+| **📈 Trail arm at (X)** | Trailing stop: the multiple at which trailing **starts** (e.g. `3x`). Once a position reaches it, KACHIBOT remembers the peak and sells if price gives back your *Trail back %*. Off until you set it. | 3x | 1.05 – 1000 |
+| **📉 Trail back %** | How far the price may fall back from the peak before trailing sells (e.g. `25` = sell after giving back 25% of the peak). | 25 | 1 – 90 |
+| **🎗 break-even stop** | After your **first** take-profit rung banks profit, the stop on the remaining bag moves up to break-even — the trade can no longer end in a loss. | ON | toggle |
+| **⏳ Max hold (hours)** | Auto-exit any position older than this, whatever the price (`0` = off). | off | 0 – 720 |
+| **⚠️ Low balance alert (SOL)** | Warns you (at most once every 6h) when your wallet dips below this, *before* a watched wallet apes and the copy gets blocked. `0` = off. | 0.02 | 0 – 100 |
 | **📏 Min-spend filter (SOL)** | Ignores watched-wallet buys *smaller* than this. | 0.0001 | 0.00001 – 100 |
 | **📏 Max-spend filter (SOL)** | Ignores watched-wallet buys *bigger* than this. | 100 SOL (effectively off) | 0.0001 – 5000 |
 | **🪫 Per-trade cap (SOL)** | Hard ceiling for a single copy-buy, whatever the mode says. | 0.05 SOL | 0.0001 – 10 |
@@ -132,6 +137,8 @@ The old copy-sell was all-or-nothing: the watched wallet sold, you sold everythi
 | 🙌 **Hold** | Nothing — you stay in | TP ladder + stop-loss still guard it |
 | 🎯 **Sell at X** | Nothing — you stay in | Whole bag sold when it hits your multiple (e.g. 3x) |
 | 📈 **Sell at mcap** | Nothing — you stay in | Whole bag sold when the coin hits your market cap (e.g. 100k) |
+
+**Per-wallet buy size (💰)** — from a watch card tap **💰 buy size** to give that wallet its own size: a fixed SOL amount, or a % of what *that* wallet spends. Otherwise it inherits your global size. Your per-trade cap always wins.
 
 **Where to set it**
 - **⚙️ Settings → 💸 Exit rule (all wallets)** — your default for every wallet.
@@ -174,6 +181,9 @@ A watched wallet only triggers buys while it's **live** (not paused) and only if
 3. If everything passes, KACHIBOT buys the same token for you (on the bonding curve, or via a DEX route if the coin already graduated off it) and a **position** is opened.
 4. Then it manages the exit:
    - **TP ladder** sells portions as price hits each multiple;
+   - **trailing stop** (if armed) sells when price gives back your % from the peak;
+   - **break-even stop** protects the rest once the first rung banked profit;
+   - **max hold time** exits anything older than your limit;
    - **Stop-loss** sells everything if price drops to your limit;
    - **copy-sell** (if ON) sells when the watched wallet sells — following your **exit rule** (sell all, a %, or nothing);
    - a **rug guard** watches for liquidity pulls/scams and bails out if detected.

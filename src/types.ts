@@ -4,7 +4,7 @@
 import { DEFAULT_SETTINGS } from './config';
 
 export type BuyMode = 'fixed' | 'pct';
-export type ExitReason = 'TP' | 'SL' | 'COPY_SELL' | 'MANUAL' | 'PANIC' | 'RUG' | 'ERROR';
+export type ExitReason = 'TP' | 'SL' | 'COPY_SELL' | 'MANUAL' | 'PANIC' | 'RUG' | 'TRAIL' | 'TIME' | 'ERROR';
 export type TradeStatus = 'open' | 'closed' | 'failed';
 
 export interface AlertsConfig { snipes: boolean; sells: boolean; activity: boolean; }
@@ -116,6 +116,85 @@ export function parseExitInput(
   return { ok: true, cfg: { mode: 'mcap', pct: 1, mult: null, mcapUsd: usd } };
 }
 
+/* ------------------------- risk / exit automation ------------------------ */
+
+export interface TrailingStopConfig {
+  enabled: boolean;
+  /** only start trailing once the position has reached this multiple */
+  armAtMult: number;
+  /** give back this fraction from the peak before selling (0.25 = -25% off peak) */
+  trailPct: number;
+}
+
+/** per-watch buy-size override (otherwise the global size is used) */
+export interface BuySizeConfig {
+  mode: BuyMode;
+  /** fixed: lamports per snipe · pct: fraction (0..1) of the watched spend */
+  value: number;
+}
+
+/**
+ * Trailing-stop trigger for a position: the multiple at or below which the
+ * position is sold. null = not armed (never railed high enough yet).
+ */
+export function trailingExitMultiple(peak: number, cfg: TrailingStopConfig): number | null {
+  if (!cfg || !cfg.enabled) return null;
+  const arm = Number(cfg.armAtMult);
+  const give = Number(cfg.trailPct);
+  if (!Number.isFinite(arm) || !Number.isFinite(give)) return null;
+  if (!Number.isFinite(peak) || peak < arm) return null;
+  return peak * (1 - Math.min(0.9, Math.max(0.01, give)));
+}
+
+/** break-even stop arms after the first take-profit rung has banked profit */
+export function breakEvenArmed(partialSells: Array<{ reason?: string | null }> | null | undefined): boolean {
+  return (partialSells || []).some((s) => s && s.reason === 'TP');
+}
+
+/**
+ * Backfill settings that did not exist when an account was created, so new
+ * features work for long-standing users without a database migration.
+ * Only fills what is missing — it never overwrites a user's own choice.
+ */
+export function ensureSettings(s: UserSettings): UserSettings {
+  if (!s) return s;
+  if (!s.trailing) s.trailing = normalizeTrailing(null);
+  if (typeof s.breakEvenStop !== 'boolean') s.breakEvenStop = DEFAULT_SETTINGS.breakEvenStop;
+  if (s.maxHoldMs === undefined) s.maxHoldMs = DEFAULT_SETTINGS.maxHoldMs;
+  if (typeof s.lowBalanceWarnLamports !== 'number') s.lowBalanceWarnLamports = DEFAULT_SETTINGS.lowBalanceWarnLamports;
+  if (!s.exit) s.exit = { ...EXIT_DEFAULT };
+  return s;
+}
+
+/** fill in a trailing config for docs created before this feature existed */
+export function normalizeTrailing(cfg: unknown): TrailingStopConfig {
+  const c = (cfg || {}) as Partial<TrailingStopConfig>;
+  const arm = Number(c.armAtMult);
+  const give = Number(c.trailPct);
+  return {
+    enabled: !!c.enabled,
+    armAtMult: Number.isFinite(arm) && arm > 0 ? arm : 3,
+    trailPct: Number.isFinite(give) && give > 0 ? Math.min(0.9, give) : 0.25,
+  };
+}
+
+export function resolveBuySize(doc: { settings: UserSettings }, watch?: { buySize?: BuySizeConfig | null } | null): BuySizeConfig {
+  const ov = watch && watch.buySize ? watch.buySize : null;
+  if (ov && (ov.mode === 'fixed' || ov.mode === 'pct')) {
+    const v = Number(ov.value);
+    if (Number.isFinite(v) && v > 0) return { mode: ov.mode, value: ov.mode === 'pct' ? Math.min(2, v) : v };
+  }
+  const s = doc.settings;
+  return s.buyMode === 'pct'
+    ? { mode: 'pct', value: s.buyPctOfSpend }
+    : { mode: 'fixed', value: s.buyAmountLamports };
+}
+
+export function describeBuySize(cfg: BuySizeConfig): string {
+  if (!cfg || cfg.mode === 'pct') return `${Math.round((cfg?.value ?? 0) * 100)}% of ape's spend`;
+  return `${(cfg.value / 1e9).toFixed(4)} SOL fixed`;
+}
+
 export interface UserSettings {
   buyMode: BuyMode;
   /** lamports of SOL per snipe in fixed mode */
@@ -134,6 +213,14 @@ export interface UserSettings {
   copySell: boolean;
   /** global default exit rule; a watched wallet can override it */
   exit: ExitConfig;
+  /** trailing stop: bank runners by trailing the peak once armed */
+  trailing: TrailingStopConfig;
+  /** after the first TP rung, move the stop to break-even on the rest */
+  breakEvenStop: boolean;
+  /** auto-exit a position after this long (ms); null = never */
+  maxHoldMs: number | null;
+  /** warn when the trading wallet drops below this balance (lamports); 0 = off */
+  lowBalanceWarnLamports: number;
   /** ignore watched buys smaller than this (lamports) */
   minSpendLamports: number;
   /** ignore watched buys larger than this (lamports) */
@@ -162,6 +249,8 @@ export interface WatchedWallet {
   lastBuySeenAt?: number;
   /** per-wallet exit rule; null/absent = inherit the global default */
   exit?: ExitConfig | null;
+  /** per-wallet buy size; null/absent = inherit the global size */
+  buySize?: BuySizeConfig | null;
 }
 
 /** one stored Solana wallet inside a user's vault (multi-wallet supported) */
@@ -199,7 +288,7 @@ export interface UserDoc {
 /** one open/closed trade = one buy + its sell chain = one scorecard */
 export interface PartialSell {
   time: number;
-  reason: 'TP' | 'SL' | 'COPY_SELL' | 'MANUAL' | 'PANIC' | 'RUG' | 'ERROR';
+  reason: ExitReason;
   /** multiple of entry at which this chunk was sold (exit/entry) */
   multiple: number;
   tokenAmountRaw: string;
@@ -224,6 +313,8 @@ export interface TradeRow {
   entryPriceLamports: number;      // SOL lamports per raw token at entry
   entryMcapLamports: number | null;
   walletBalanceBefore: number | null;
+  /** highest multiple seen while open (drives the trailing stop) */
+  peakMultiple: number | null;
   settingsAtEntry: {
     tpMultiples: number[];
     stopLossPct: number;
@@ -232,6 +323,12 @@ export interface TradeRow {
     maxFeeLamports: number;
     /** exit rule snapshot at entry (per-watch override resolved) */
     exit?: ExitConfig | null;
+    /** trailing-stop snapshot at entry */
+    trailing?: TrailingStopConfig | null;
+    /** break-even stop snapshot at entry */
+    breakEvenStop?: boolean;
+    /** max hold time snapshot at entry (ms; null = never) */
+    maxHoldMs?: number | null;
   };
   partialSells: PartialSell[];
   status: TradeStatus;
@@ -346,6 +443,36 @@ export function validateAndApply(path: string, rawValue: string, s: UserSettings
       }
       s.tpMultiples = [...new Set(parts)].sort((a, b) => a - b).slice(0, 5);
       return { ok: true, applied: `TP ladder: ${s.tpMultiples.map((m) => `${m}x`).join(', ')}` };
+    }
+    case 'trail_arm': {
+      const t = normalizeTrailing(s.trailing);
+      const raw = Number(v.replace(/x$/i, ''));
+      if (!Number.isFinite(raw) || raw < 1.05 || raw > 1000) {
+        return { ok: false, error: 'arm the trailing stop at a multiple ≥1.05 (e.g. 3x)' };
+      }
+      s.trailing = { ...t, armAtMult: raw, enabled: true };
+      return { ok: true, applied: `trailing arms at ${raw}x (ON)` };
+    }
+    case 'trail_pct': {
+      const t = normalizeTrailing(s.trailing);
+      const raw = Number(v.replace(/%$/, '')) / 100;
+      if (!Number.isFinite(raw) || raw < 0.01 || raw > 0.9) {
+        return { ok: false, error: 'give-back must be between 1% and 90% (e.g. 25)' };
+      }
+      s.trailing = { ...t, trailPct: raw };
+      return { ok: true, applied: `trail back ${Math.round(raw * 100)}% from peak` };
+    }
+    case 'max_hold': {
+      const e = setNum(0, 720, (x) => { s.maxHoldMs = x <= 0 ? null : Math.round(x * 3_600_000); });
+      return e
+        ? { ok: false, error: e }
+        : { ok: true, applied: num <= 0 ? 'max hold off (hold until a rule exits)' : `max hold ${num}h` };
+    }
+    case 'low_bal': {
+      const e = setNum(0, 100, (x) => { s.lowBalanceWarnLamports = Math.floor(x * 1e9); });
+      return e
+        ? { ok: false, error: e }
+        : { ok: true, applied: num <= 0 ? 'low-balance alert off' : `warn below ${num} SOL` };
     }
     case 'stop_loss': {
       const e = setNum(0.01, 0.99, (x) => { s.stopLossPct = x; });

@@ -8,8 +8,10 @@ const { classifyPumpIx, pumpIxArgs } = require('../dist/chain/pump');
 const {
   validateAndApply, defaultSettings, summarizeTrades, lamportsToSol,
   resolveExit, normalizeExit, describeExit, exitSellFraction, parseExitInput,
-  formatMcapUsd, EXIT_DEFAULT,
+  formatMcapUsd, EXIT_DEFAULT, normalizeTrailing, trailingExitMultiple, breakEvenArmed,
+  resolveBuySize, describeBuySize,
 } = require('../dist/types');
+const { computeBudget } = require('../dist/trader');
 const { solShort, scorecardText, chartLink, pctSigned, coinTag, solExact } = require('../dist/format');
 
 const disc = (arr) => Buffer.from(arr);
@@ -304,4 +306,81 @@ test('partial sell math: exact shares and no dust crumbs left behind', () => {
   // out-of-range fractions are clamped, never negative or oversized
   assert.strictEqual(tokensForFraction(1000n, 1000n, 5), 1000n);
   assert.strictEqual(tokensForFraction(1000n, 1000n, -1), 10n);
+});
+
+test('trailing stop only arms after the configured multiple', () => {
+  const cfg = { enabled: true, armAtMult: 3, trailPct: 0.25 };
+  assert.strictEqual(trailingExitMultiple(2, cfg), null);   // never reached 3x yet
+  assert.strictEqual(trailingExitMultiple(2.99, cfg), null);
+  // armed at 3x: sell if it gives back 25% of the 3x peak (2.25x)
+  assert.strictEqual(trailingExitMultiple(3, cfg), 2.25);
+  // peak climbs, the stop climbs with it
+  assert.strictEqual(trailingExitMultiple(10, cfg), 7.5);
+  // disabled -> never triggers
+  assert.strictEqual(trailingExitMultiple(10, { ...cfg, enabled: false }), null);
+  // junk from a legacy doc is normalised instead of crashing
+  const norm = normalizeTrailing({ enabled: true });
+  assert.strictEqual(norm.armAtMult, 3);
+  assert.strictEqual(norm.trailPct, 0.25);
+  assert.strictEqual(trailingExitMultiple(5, norm), 3.75);
+});
+
+test('break-even stop arms only after a take-profit rung banked profit', () => {
+  assert.strictEqual(breakEvenArmed([]), false);
+  assert.strictEqual(breakEvenArmed([{ reason: 'COPY_SELL' }]), false);
+  assert.strictEqual(breakEvenArmed([{ reason: 'TP' }]), true);
+  assert.strictEqual(breakEvenArmed([{ reason: 'SL' }, { reason: 'TP' }]), true);
+  assert.strictEqual(breakEvenArmed(null), false);
+});
+
+test('per-wallet buy size overrides the global size, and the cap still binds', () => {
+  const s = defaultSettings();
+  s.buyMode = 'fixed';
+  s.buyAmountLamports = 5_000_000;
+  s.perTradeCapLamports = 50_000_000;
+  const doc = { settings: s };
+  // inherited
+  assert.deepStrictEqual(resolveBuySize(doc, { buySize: null }), { mode: 'fixed', value: 5_000_000 });
+  assert.strictEqual(computeBudget(resolveBuySize(doc, null), null, s.perTradeCapLamports), 5_000_000);
+  // override: fixed
+  const wFixed = { buySize: { mode: 'fixed', value: 20_000_000 } };
+  assert.strictEqual(computeBudget(resolveBuySize(doc, wFixed), null, s.perTradeCapLamports), 20_000_000);
+  // override: % of the ape's spend
+  const wPct = { buySize: { mode: 'pct', value: 0.5 } };
+  assert.strictEqual(computeBudget(resolveBuySize(doc, wPct), 100_000_000, s.perTradeCapLamports), 50_000_000);
+  // the per-trade cap always wins
+  assert.strictEqual(computeBudget(resolveBuySize(doc, wPct), 1_000_000_000, s.perTradeCapLamports), 50_000_000);
+  // % mode with no spend info falls back to the fixed value
+  assert.strictEqual(computeBudget(resolveBuySize(doc, wPct), null, s.perTradeCapLamports), 0);
+  // labels
+  assert.strictEqual(describeBuySize({ mode: 'fixed', value: 20_000_000 }), '0.0200 SOL fixed');
+  assert.strictEqual(describeBuySize({ mode: 'pct', value: 0.5 }), "50% of ape's spend");
+});
+
+test('risk settings validate and apply (trailing, max hold, low balance)', () => {
+  const s = defaultSettings();
+  let r = validateAndApply('trail_arm', '3x', s);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(s.trailing.armAtMult, 3);
+  assert.strictEqual(s.trailing.enabled, true);
+  r = validateAndApply('trail_pct', '25', s);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(s.trailing.trailPct, 0.25);
+  assert.strictEqual(validateAndApply('trail_pct', '99', s).ok, false); // >90% give-back is nonsense
+  r = validateAndApply('max_hold', '6', s);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(s.maxHoldMs, 6 * 3_600_000);
+  r = validateAndApply('max_hold', '0', s);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(s.maxHoldMs, null); // 0 = off
+  r = validateAndApply('low_bal', '0.02', s);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(s.lowBalanceWarnLamports, 20_000_000);
+  r = validateAndApply('low_bal', '0', s);
+  assert.strictEqual(s.lowBalanceWarnLamports, 0); // off
+  // works on a doc created before these fields existed
+  const legacy = defaultSettings();
+  delete legacy.trailing;
+  assert.strictEqual(validateAndApply('trail_arm', '5', legacy).ok, true);
+  assert.strictEqual(legacy.trailing.trailPct, 0.25);
 });

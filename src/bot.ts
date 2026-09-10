@@ -11,7 +11,8 @@ import { getStore } from './db';
 import {
   UserDoc, WalletRecord, summarizeTrades, validateAndApply,
   resolveExit, normalizeExit, describeExit, parseExitInput, formatMcapUsd, EXIT_DEFAULT,
-  type ExitConfig, type ExitMode,
+  resolveBuySize, describeBuySize, normalizeTrailing,
+  type ExitConfig, type ExitMode, type BuySizeConfig,
 } from './types';
 import { trader, bustWalletCache } from './trader';
 import { watcher } from './watcher';
@@ -43,9 +44,14 @@ const SETTING_LABELS: Array<[string, string]> = [
   ['🪫 Per-trade cap (SOL)', 'trade_cap'],
   ['🪫 Daily spend cap (SOL)', 'daily_cap'],
   ['⏱ Watch cooldown (seconds)', 'cooldown'],
+  ['📈 Trail arm at (X)', 'trail_arm'],
+  ['📉 Trail back %', 'trail_pct'],
+  ['⏳ Max hold (hours, 0 = off)', 'max_hold'],
+  ['⚠️ Low balance alert (SOL)', 'low_bal'],
 ];
 
 function settingsSummary(s: UserDoc['settings']): string {
+  const trail = normalizeTrailing(s.trailing);
   const mode = s.buyMode === 'pct'
     ? `${Math.round(s.buyPctOfSpend * 100)}% of watched spend`
     : `fixed ${sol(s.buyAmountLamports)}`;
@@ -54,6 +60,10 @@ function settingsSummary(s: UserDoc['settings']): string {
     `💧 slippage: <b>${Math.round(s.slippagePct * 100)}%</b>`,
     `⚡ fee cap/tx: <b>${sol(s.maxFeeLamports)}</b>`,
     `🎯 TP ladder: <b>${s.tpMultiples.length ? s.tpMultiples.map((m) => `${m}x`).join(', ') : 'off'}</b>`,
+    `🎏 trailing: <b>${trail.enabled ? `from ${trail.armAtMult}x, -${Math.round(trail.trailPct * 100)}% off peak` : 'off'}</b>`,
+    `🎗 break-even stop: <b>${s.breakEvenStop ? 'ON' : 'off'}</b>`,
+    `⏳ max hold: <b>${s.maxHoldMs ? `${(s.maxHoldMs / 3_600_000).toFixed(1)}h` : 'off'}</b>`,
+    `⚠️ low-balance alert: <b>${s.lowBalanceWarnLamports > 0 ? `below ${sol(s.lowBalanceWarnLamports)}` : 'off'}</b>`,
     `🛑 stop-loss: <b>-${Math.round(s.stopLossPct * 100)}%</b>`,
     `👻 copy-sell: <b>${s.copySell ? 'ON' : 'off'}</b>`,
     `💸 exit rule: <b>${describeExit(normalizeExit(s.exit))}</b>`,
@@ -231,6 +241,10 @@ export class KachiBot {
       B(`👻 copy-sell ${s.copySell ? '✅' : '⬜'}`, 's:copySell'),
       B(`🛡 honeypot ${s.honeypotCheck ? '✅' : '⬜'}`, 's:honeypot'),
     ));
+    kbRows.push(row(
+      B(`🎏 trailing ${s.trailing?.enabled ? '✅' : '⬜'}`, 's:trailing'),
+      B(`🎗 break-even ${s.breakEvenStop ? '✅' : '⬜'}`, 's:breakeven'),
+    ));
     kbRows.push(row(B('💸 Exit rule (all wallets)', 's:exit')));
     kbRows.push(row(B('🔙 Main', 'm:main')));
     await this.answer(ctx, `⚙️ <b>TRADING SETTINGS</b>\n\n${settingsSummary(s)}\n\nTap to change:`, { kb: this.kb(kbRows) });
@@ -249,6 +263,10 @@ export class KachiBot {
       case 'trade_cap': return sol(s.perTradeCapLamports);
       case 'daily_cap': return sol(s.dailyCapLamports);
       case 'cooldown': return `${Math.round(s.watcherCooldownMs / 1000)}s`;
+      case 'trail_arm': return `${s.trailing?.armAtMult ?? 3}x`;
+      case 'trail_pct': return `${Math.round((s.trailing?.trailPct ?? 0.25) * 100)}%`;
+      case 'max_hold': return s.maxHoldMs ? `${(s.maxHoldMs / 3_600_000).toFixed(1)}h` : 'off';
+      case 'low_bal': return s.lowBalanceWarnLamports > 0 ? sol(s.lowBalanceWarnLamports) : 'off';
       default: return '';
     }
   }
@@ -537,6 +555,8 @@ export class KachiBot {
     const buyLine = w.lastBuySeenAt ? `🕓 last buy seen ${ago(w.lastBuySeenAt)}` : null;
     const exitCfg = resolveExit(doc, w);
     const exitLine = `💸 exit: <b>${describeExit(exitCfg)}</b>${w.exit ? '' : ' (default)'}`;
+    const sizeCfg = resolveBuySize(doc, w);
+    const sizeLine = `💰 size: <b>${describeBuySize(sizeCfg)}</b>${w.buySize ? '' : ' (default)'}`;
     const text = [
       `👁 <b>${escTag(w.label)}</b>`,
       `Address: <code>${w.address}</code>`,
@@ -544,11 +564,12 @@ export class KachiBot {
       statusLine,
       buyLine,
       exitLine,
+      sizeLine,
       perf,
     ].filter(Boolean).join('\n');
     const kb = this.kb([
       row(B(w.paused ? '▶️ resume' : '⏸ pause', `wv:${w.id}:pause`), B('🗑 remove', `wv:${w.id}:remove`)),
-      row(B('💸 exit rule', `ex:${w.id}:menu`)),
+      row(B('💸 exit rule', `ex:${w.id}:menu`), B('💰 buy size', `bs:${w.id}:menu`)),
       row(B('🔙 Watchlist', 'm:watch')),
     ]);
     await this.answer(ctx, text, { kb });
@@ -593,6 +614,35 @@ export class KachiBot {
       '🎯 / 📈 — ignore its sells and exit the whole bag at your own X or market cap',
       '',
       'Applies to coins copied from this wallet going forward.',
+    ].join('\n');
+    await this.answer(ctx, text, { kb: this.kb(kbRows) });
+  }
+
+  /** per-wallet buy size: bs:<watchId>:<action> */
+  private async showBuySizeMenu(ctx: Context, watchId: string): Promise<void> {
+    const doc = await this.docFor(this.uid(ctx));
+    const w = doc.watched.find((x) => x.id === watchId);
+    if (!w) { await ctx.reply('target gone', HTML); return; }
+    const cur = resolveBuySize(doc, w);
+    const inherited = !w.buySize;
+    const mark = (m: 'fixed' | 'pct'): string => (cur.mode === m && !inherited ? ' ✅' : '');
+    const kbRows: BtnRow[] = [
+      row(B(`💵 fixed SOL per copy${mark('fixed')}`, `bs:${watchId}:fixed`)),
+      row(B(`📊 % of this ape's spend${mark('pct')}`, `bs:${watchId}:pct`)),
+      row(B('↩️ use global default', `bs:${watchId}:inherit`)),
+      row(B('🔙 Target', `wv:${watchId}`)),
+    ];
+    const text = [
+      `💰 <b>BUY SIZE</b> — for ${escTag(w.label)}`,
+      '',
+      `current: <b>${describeBuySize(cur)}</b>${inherited ? ' (inherited from your global size)' : ''}`,
+      '',
+      inherited
+        ? '💵 fixed — spend a set amount every time this wallet buys'
+        : '💵 fixed — spend a set amount every time this wallet buys',
+      `📊 % — copy a percentage of what this wallet spends (budget still capped by your per-trade cap)`,
+      '',
+      'Only changes what you spend for coins copied from this wallet.',
     ].join('\n');
     await this.answer(ctx, text, { kb: this.kb(kbRows) });
   }
@@ -760,6 +810,20 @@ export class KachiBot {
       await this.cbText(ctx, `honeypot check ${doc.settings.honeypotCheck ? 'ON' : 'OFF'}`);
       await this.showSettings(ctx);
     });
+    on('s:trailing', async (ctx) => {
+      const doc = await this.docFor(this.uid(ctx));
+      doc.settings.trailing = { ...normalizeTrailing(doc.settings.trailing), enabled: !doc.settings.trailing?.enabled };
+      await this.saveDoc(doc);
+      await this.cbText(ctx, `trailing stop ${doc.settings.trailing.enabled ? 'ON' : 'OFF'}`);
+      await this.showSettings(ctx);
+    });
+    on('s:breakeven', async (ctx) => {
+      const doc = await this.docFor(this.uid(ctx));
+      doc.settings.breakEvenStop = !doc.settings.breakEvenStop;
+      await this.saveDoc(doc);
+      await this.cbText(ctx, `break-even stop ${doc.settings.breakEvenStop ? 'ON' : 'OFF'}`);
+      await this.showSettings(ctx);
+    });
     on('s:exit', async (ctx) => {
       await this.showExitMenu(ctx, 'g');
     });
@@ -810,6 +874,29 @@ export class KachiBot {
       await this.saveDoc(doc);
       await this.cbText(ctx, describeExit(cfg));
       await this.showExitMenu(ctx, scope);
+    });
+
+    // per-wallet buy size
+    on('bs', async (ctx, rest) => {
+      const [watchId, action] = rest.split(':');
+      const doc = await this.docFor(this.uid(ctx));
+      const w = doc.watched.find((x) => x.id === watchId);
+      if (!w) { await ctx.reply('target gone', HTML); return; }
+      if (action === 'menu') { await this.showBuySizeMenu(ctx, watchId); return; }
+      if (action === 'inherit') {
+        w.buySize = null;
+        await this.saveDoc(doc);
+        await this.cbText(ctx, 'using global size');
+        await this.showBuySizeMenu(ctx, watchId);
+        return;
+      }
+      const prompts: Record<string, string> = {
+        fixed: 'Type the SOL amount to spend per copy from this wallet, e.g. 0.02',
+        pct: "Type the % of this wallet's spend to copy, e.g. 50",
+      };
+      this.pending.set(this.uid(ctx), { expect: `bsval:${watchId}:${action}` });
+      await this.cbText(ctx, 'enter value');
+      await this.answer(ctx, `💰 <b>BUY SIZE</b>\n\n${prompts[action] || 'Type the new value'}\n\n(or /cancel)`);
     });
 
     // wallet
@@ -1043,6 +1130,25 @@ export class KachiBot {
           await this.saveDoc(doc);
           await ctx.reply(`✅ <b>${res.applied}</b>`, HTML);
           await this.showSettings(ctx);
+          return;
+        }
+        if (stage.expect.startsWith('bsval:')) {
+          const [, watchId, mode] = stage.expect.split(':');
+          const w = doc.watched.find((x) => x.id === watchId);
+          if (!w) { await ctx.reply('target gone', HTML); return; }
+          const n = Number(text.replace(/[%,]/g, '').replace(/sol/i, '').trim());
+          if (!Number.isFinite(n) || n <= 0) {
+            await ctx.reply('❌ enter a positive number — try again or /cancel.', HTML);
+            this.pending.set(userId, stage);
+            return;
+          }
+          const cfg: BuySizeConfig = mode === 'pct'
+            ? { mode: 'pct', value: Math.min(2, n / 100) }
+            : { mode: 'fixed', value: Math.floor(n * 1e9) };
+          w.buySize = cfg;
+          await this.saveDoc(doc);
+          await ctx.reply(`✅ buy size for ${escTag(w.label)}: <b>${describeBuySize(cfg)}</b>`, HTML);
+          await this.watchDetail(ctx, watchId);
           return;
         }
         if (stage.expect.startsWith('exitval:')) {

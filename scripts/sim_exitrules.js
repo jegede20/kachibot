@@ -83,5 +83,86 @@ const ev = { userId: 1, watchId: 'w1', watchedAddress: 'A', watchedLabel: 'ape #
     await trader.checkThresholds(1, row).catch((e) => console.log('  ERR', e.message));
     console.log(`  ${name.padEnd(26)} → ${calls.length ? calls.join(', ') : 'no exit (waiting)'}`);
   }
+  console.log('\n=== C. trailing stop / break-even / max hold ===');
+  const mkRow = (over = {}) => {
+    const r = openRow();
+    r.id = `T-sim-${Math.random().toString(36).slice(2, 8)}`; // unique: peaks are keyed by row id
+    r.settingsAtEntry.tpMultiples = [];   // isolate the rule under test
+    Object.assign(r, over);
+    return r;
+  };
+  const runChecks = async (row, values) => {
+    calls.length = 0;
+    trader.sellOpenPosition = async (u, id, reason) => { calls.push(`SELL_ALL(${reason})`); return null; };
+    trader.sellTpStepLocked = async (u, r, target) => { calls.push(`LADDER(${target}x)`); };
+    for (const v of values) {
+      trader.liveValueLamports = async () => v;
+      await trader.checkThresholds(1, row).catch((e) => console.log('  ERR', e.message));
+      if (calls.length) break;
+    }
+    return calls.join(', ') || 'no exit';
+  };
+
+  const trailCfg = { enabled: true, armAtMult: 3, trailPct: 0.25 };
+  let row = mkRow();
+  row.settingsAtEntry = { ...row.settingsAtEntry, trailing: trailCfg };
+  console.log('  armed 3x/-25%, price 2.5x → 4x → 2.9x  →', await runChecks(row, [250e6, 400e6, 290e6]), '(4x peak, stop 3.0x)');
+
+  row = mkRow();
+  row.settingsAtEntry = { ...row.settingsAtEntry, trailing: trailCfg };
+  console.log('  armed 3x/-25%, price 2.5x → 3.4x        →', await runChecks(row, [250e6, 340e6]), '(peak 3.4x, stop 2.55x)');
+
+  row = mkRow();
+  row.settingsAtEntry = { ...row.settingsAtEntry, trailing: { ...trailCfg, enabled: false } };
+  console.log('  trailing OFF, price 1x → 5x → 0.5x      →', await runChecks(row, [100e6, 500e6, 50e6]), '(ladder/stop-loss own it)');
+
+  // break-even: a TP rung already banked profit
+  row = mkRow({ partialSells: [{ time: Date.now(), reason: 'TP', multiple: 2, tokenAmountRaw: '500', quoteLamports: 200e6, txSignature: null }] });
+  row.settingsAtEntry = { ...row.settingsAtEntry, breakEvenStop: true };
+  console.log('  break-even armed, remainder falls to 0.98x →', await runChecks(row, [49e6]), '(sold at break-even, not -50%)');
+
+  row = mkRow();
+  row.settingsAtEntry = { ...row.settingsAtEntry, breakEvenStop: true };
+  console.log('  no TP rung yet, price falls to 0.60x      →', await runChecks(row, [60e6]), '(normal -50% stop still rules)');
+
+  // max hold
+  row = mkRow({ entryTime: Date.now() - 7 * 3600_000 });
+  row.settingsAtEntry = { ...row.settingsAtEntry, maxHoldMs: 6 * 3600_000 };
+  console.log('  max hold 6h, position is 7h old          →', await runChecks(row, [150e6]), '(time exit)');
+
+  row = mkRow({ entryTime: Date.now() - 60_000 });
+  row.settingsAtEntry = { ...row.settingsAtEntry, maxHoldMs: 6 * 3600_000 };
+  console.log('  max hold 6h, position is 1m old          →', await runChecks(row, [150e6]), '(ladder still rules)');
+
+  console.log('\n=== D. low-balance heads-up ===');
+  const { encryptSecret } = D('crypto');
+  const conn = D('chain/conn');
+  conn.getConnection = () => ({ getBalance: async () => 8_000_000 }); // wallet: 0.008 SOL
+  const bs58mod = require('bs58');
+  const b58 = (buf) => (bs58mod.encode ? bs58mod.encode(buf) : bs58mod.default.encode(buf));
+  const { Keypair } = require('@solana/web3.js');
+  const real = Keypair.generate();
+  const s = defaultSettings();
+  s.lowBalanceWarnLamports = 20_000_000;
+  s.buyAmountLamports = 5_000_000;
+  const doc = { ...docFor(null), settings: s, secret: encryptSecret(b58(real.secretKey)) };
+
+  notices.length = 0;
+  trader.balanceCheckedAt = new Map();
+  trader.balanceWarnedAt = new Map();
+  await trader.checkLowBalance(doc);
+  console.log('  balance 0.008 SOL, alert below 0.02      →', notices.length ? notices[0].replace(/<[^>]+>/g, '') : 'NO MESSAGE');
+  notices.length = 0;
+  await trader.checkLowBalance(doc);
+  console.log('  same user again immediately              →', notices.length ? 'unexpected second message' : 'silent (throttled)');
+  notices.length = 0;
+  await trader.checkLowBalance({ ...doc, settings: { ...s, lowBalanceWarnLamports: 0 } });
+  console.log('  user turned the alert off                →', notices.length ? 'unexpected message' : 'silent');
+  notices.length = 0;
+  await trader.checkLowBalance({ ...doc, watched: [] });
+  console.log('  user with an empty watchlist             →', notices.length ? 'unexpected message' : 'silent');
+
   console.log('\nAll simulations ran against stubs — no chain calls, no real trades.');
 })();
+
+/* ---------------- part C: the new risk rules (added later) ---------------- */

@@ -7,7 +7,11 @@
 import { Keypair, PublicKey, VersionedTransaction, TransactionInstruction } from '@solana/web3.js';
 import BN from 'bn.js';
 import { getStore, Store } from './db';
-import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit } from './types';
+import {
+  UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit,
+  resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing,
+  type TrailingStopConfig, type BuySizeConfig,
+} from './types';
 import {
   curvePhase, fetchCurve, loadPricingCtx, sellSolLamportsForTokenAmount,
   buildCurveBuy, buildCurveSell, mcapSolLamports, priceSolPerTokenLamports,
@@ -90,14 +94,14 @@ function escTag(x: string): string {
   return x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function computeBudget(s: UserDoc['settings'], watchedSpend: number | null): number {
+export function computeBudget(size: BuySizeConfig, watchedSpend: number | null, perTradeCapLamports: number): number {
   let budget: number;
-  if (s.buyMode === 'pct' && watchedSpend !== null && watchedSpend > 0) {
-    budget = Math.floor(watchedSpend * s.buyPctOfSpend);
+  if (size.mode === 'pct' && watchedSpend !== null && watchedSpend > 0) {
+    budget = Math.floor(watchedSpend * size.value);
   } else {
-    budget = s.buyAmountLamports;
+    budget = Math.floor(size.value);
   }
-  return Math.max(0, Math.min(budget, s.perTradeCapLamports));
+  return Math.max(0, Math.min(budget, perTradeCapLamports));
 }
 
 /** how many raw tokens to sell for a fraction of the remaining bag (pure, tested) */
@@ -119,6 +123,11 @@ export class Trader {
   private knownUsers = new Set<number>();
   private checkerTimer: NodeJS.Timeout | null = null;
   private sellingRows = new Set<string>();
+  /** in-memory peak multiple per open row (drives the trailing stop) */
+  private peaks = new Map<string, number>();
+  /** throttles for the low-balance heads-up */
+  private balanceCheckedAt = new Map<number, number>();
+  private balanceWarnedAt = new Map<number, number>();
 
   touchUser(userId: number): void {
     this.knownUsers.add(userId);
@@ -171,7 +180,8 @@ export class Trader {
       return;
     }
 
-    const budget = computeBudget(s, ev.spendLamports);
+    const buySize = resolveBuySize(doc, ev.watchId ? doc.watched.find((w) => w.id === ev.watchId) || null : null);
+    const budget = computeBudget(buySize, ev.spendLamports, s.perTradeCapLamports);
     if (budget <= 0) return;
 
     const bal = await conn.getBalance(wallet.publicKey, 'confirmed').catch(() => -1);
@@ -313,8 +323,12 @@ export class Trader {
       entryPriceLamports: 0,
       entryMcapLamports: null,
       walletBalanceBefore: null,
+      peakMultiple: null,
       settingsAtEntry: {
-        exit: resolveExit(doc, doc.watched.find((w) => w.id === ev.watchId) || null),
+        exit: resolveExit(doc, ev.watchId ? doc.watched.find((w) => w.id === ev.watchId) || null : null),
+        trailing: normalizeTrailing(s.trailing),
+        breakEvenStop: !!s.breakEvenStop,
+        maxHoldMs: s.maxHoldMs ?? null,
         tpMultiples: [...s.tpMultiples],
         stopLossPct: s.stopLossPct,
         copySell: s.copySell,
@@ -684,7 +698,43 @@ export class Trader {
       } catch (e) {
         console.error('[trader] checker:', (e as Error).message);
       }
+      // proactive refill nudge — so the next ape is not blocked at buy time
+      await this.checkLowBalance(doc).catch(() => undefined);
     }
+  }
+
+  /**
+   * Warn once when the trading wallet is running low, well before the next
+   * watched buy is blocked for insufficient funds. Silent for users with no
+   * wallet or no watchlist, and throttled so it can never spam.
+   */
+  private async checkLowBalance(doc: UserDoc): Promise<void> {
+    const threshold = Number(doc.settings.lowBalanceWarnLamports);
+    if (!Number.isFinite(threshold) || threshold <= 0) return;
+    if (!doc.watched || doc.watched.length === 0) return;
+    const now = Date.now();
+    if (now - (this.balanceCheckedAt.get(doc.userId) || 0) < 5 * 60_000) return;
+    this.balanceCheckedAt.set(doc.userId, now);
+
+    const wallet = getWallet(doc);
+    if (!wallet) return; // no wallet yet — the buy-time notice covers that
+    const bal = await getConnection().getBalance(wallet.publicKey).catch(() => null);
+    if (bal === null) return;
+    if (bal >= threshold) return;
+    if (now - (this.balanceWarnedAt.get(doc.userId) || 0) < 6 * 3_600_000) return;
+    this.balanceWarnedAt.set(doc.userId, now);
+
+    const size = resolveBuySize(doc, null);
+    const perBuy = size.mode === 'pct' ? doc.settings.buyAmountLamports : size.value;
+    const snipesLeft = perBuy > 0 ? Math.floor(bal / perBuy) : 0;
+    await notifyUser(
+      doc.userId,
+      `⚠️ <b>LOW BALANCE</b> — your wallet holds ${(bal / 1e9).toFixed(4)} SOL.\n\n`
+      + `At ${(perBuy / 1e9).toFixed(4)} SOL per copy that is about ${snipesLeft} more snipe${snipesLeft === 1 ? '' : 's'} — `
+      + `a watched wallet can ape any second, so top up now to avoid ⛔ blocked buys.\n\n`
+      + `Refill at /wallet (address in 💼 Wallet → 📥 Receive).`,
+      { silent: true },
+    );
   }
 
   private async checkThresholds(userId: number, row: TradeRow): Promise<void> {
@@ -713,7 +763,11 @@ export class Trader {
     if (basis <= 0) return;
     const mult = value / basis;
 
-    if (mult <= 1 - row.settingsAtEntry.stopLossPct) {
+    // break-even stop: once a TP rung has banked profit, the remainder may
+    // never turn into a loss — the stop moves up to its own entry price
+    const beArmed = !!row.settingsAtEntry.breakEvenStop && breakEvenArmed(row.partialSells);
+    const stopMult = beArmed ? 1 : 1 - row.settingsAtEntry.stopLossPct;
+    if (mult <= stopMult) {
       await this.sellOpenPosition(userId, row.id, 'SL');
       return;
     }
@@ -723,6 +777,30 @@ export class Trader {
     }
     // target exits: when the user set a multiple or market-cap goal for this
     // watched wallet, that single target replaces the global TP ladder
+    // hard time limit: never let a bag sit forever
+    const maxHold = row.settingsAtEntry.maxHoldMs;
+    if (maxHold && maxHold > 0 && Date.now() - row.entryTime >= maxHold) {
+      await this.sellOpenPosition(userId, row.id, 'TIME');
+      return;
+    }
+
+    // trailing stop: once armed, follow the peak down by the configured give-back
+    const trailCfg: TrailingStopConfig | null = row.settingsAtEntry.trailing || null;
+    if (trailCfg) {
+      const prevPeak = this.peaks.get(row.id) ?? row.peakMultiple ?? 0;
+      const peak = Math.max(prevPeak, mult);
+      this.peaks.set(row.id, peak);
+      if (peak > (row.peakMultiple ?? 0)) {
+        row.peakMultiple = peak;
+        await this.store.putTrade(row).catch(() => undefined);
+      }
+      const trigger = trailingExitMultiple(peak, trailCfg);
+      if (trigger !== null && mult <= trigger) {
+        await this.sellOpenPosition(userId, row.id, 'TRAIL');
+        return;
+      }
+    }
+
     const exit = normalizeExit(row.settingsAtEntry.exit);
     if (exit.mode === 'mult' && exit.mult) {
       if (mult >= exit.mult) await this.sellOpenPosition(userId, row.id, 'TP', exit.mult);
