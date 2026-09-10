@@ -19,7 +19,7 @@ import { simulate, sendTrade, confirmSignature, toVersioned } from './chain/send
 import { getTokenMeta, rugFlags, describeRugFlags } from './chain/meta';
 import { decryptSecret, keypairFromSecret } from './crypto';
 import { notifyUser } from './notify';
-import { chartLink, scorecardText } from './format';
+import { chartLink, scorecardText, coinTag, solExact } from './format';
 
 export interface WatchSignal {
   userId: number;
@@ -28,7 +28,13 @@ export interface WatchSignal {
   watchedLabel: string;
   side: 'buy' | 'sell';
   mint: string;
+  /** full token name from chain metadata (may be null for brand-new mints) */
+  mintName?: string | null;
+  /** token ticker/symbol from chain metadata */
+  mintSymbol?: string | null;
   spendLamports: number | null;
+  /** exact SOL that left the watched wallet in this tx */
+  spentSolLamports?: number | null;
   tokenAmountRaw: string | null;
   sig: string;
   route: string;
@@ -72,6 +78,11 @@ async function warnNoWallet(userId: number, reason: string): Promise<void> {
   if (now - (lastWalletWarning.get(userId) || 0) < 10 * 60_000) return;
   lastWalletWarning.set(userId, now);
   await notifyUser(userId, `⚠️ <b>${reason}</b>\n\nHead to /wallet — generate or import one, then snipes go live.`);
+}
+
+/** exact SOL the ape spent, as text (falls back to the priced estimate) */
+function apeSpendText(ev: WatchSignal): string | null {
+  return solExact(ev.spentSolLamports ?? ev.spendLamports);
 }
 
 function escTag(x: string): string {
@@ -123,13 +134,17 @@ export class Trader {
     const s = doc.settings;
     const wallet = getWallet(doc);
     if (!wallet) {
-      await warnNoWallet(doc.userId, `${ev.watchedLabel} just aped — but you have no KACHIBOT wallet yet`);
+      await warnNoWallet(doc.userId, `${ev.watchedLabel} just aped ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)} — but you have no KACHIBOT wallet yet`);
       return;
     }
     if (ev.spendLamports !== null) {
       if (ev.spendLamports < s.minSpendLamports) return;
       if (ev.spendLamports > s.maxSpendLamports) {
-        await notifyUser(doc.userId, `👁 <b>RADAR</b> — ${ev.watchedLabel} moved ${(ev.spendLamports / 1e9).toFixed(2)}◎, above your max-spend filter (${(s.maxSpendLamports / 1e9).toFixed(2)}◎). Skipped.`);
+        const spentTxt = apeSpendText(ev);
+        await notifyUser(
+          doc.userId,
+          `👁 <b>RADAR</b> — ${escTag(ev.watchedLabel)} bought ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)}${spentTxt ? ` — spent ${spentTxt}` : ''}, above your max-spend filter (${(s.maxSpendLamports / 1e9).toFixed(2)}◎). Skipped.`,
+        );
         return;
       }
     }
@@ -137,7 +152,7 @@ export class Trader {
     const phase = await curvePhase(conn, new PublicKey(ev.mint)).catch(() => 'unknown' as const);
     if (phase === 'unknown' || phase === 'none') {
       if (s.alerts.activity) {
-        await notifyUser(doc.userId, `👁 <b>RADAR</b> — ${ev.watchedLabel} bought ${ev.mint.slice(0, 8)}… which isn't a live pump token. Nothing copied.`);
+        await notifyUser(doc.userId, `👁 <b>RADAR</b> — ${escTag(ev.watchedLabel)} bought ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)} — not a live pump token (already graduated or delisted). Nothing copied.`);
       }
       return;
     }
@@ -149,9 +164,10 @@ export class Trader {
     if (bal < budget + s.maxFeeLamports + 2_000_000) {
       const have = Math.max(0, bal) / 1e9;
       const need = (budget + s.maxFeeLamports + 2_000_000) / 1e9;
+      const apeSpent = apeSpendText(ev);
       await notifyUser(
         doc.userId,
-        `⛔ <b>SNIPE BLOCKED</b> — ${escTag(ev.watchedLabel)} aped $${ev.mint.slice(0, 6)}… but your wallet holds ${have.toFixed(4)} SOL.\n\nNeed ≈ ${need.toFixed(4)} SOL to mirror it (buy + priority fee + buffer). Refill at /wallet — the next ape gets copied.`,
+        `⛔ <b>SNIPE BLOCKED</b> — ${escTag(ev.watchedLabel)} aped ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)}${apeSpent ? ` with ${apeSpent}` : ''} — but your wallet holds ${have.toFixed(4)} SOL.\n\nNeed ≈ ${need.toFixed(4)} SOL to mirror it (buy + priority fee + buffer). Refill at /wallet — the next ape gets copied.`,
       );
       return;
     }
@@ -168,7 +184,7 @@ export class Trader {
       const flags = await rugFlags(conn, new PublicKey(ev.mint));
       const issues = describeRugFlags(flags);
       if (issues.length) {
-        await notifyUser(doc.userId, `🛡️ <b>RUG CHECK FAILED</b> — skipped ${ev.mint.slice(0, 8)}… (${issues.join('; ')}).\nDisable the honeypot check in /settings to ape anyway.`);
+        await notifyUser(doc.userId, `🛡️ <b>RUG CHECK FAILED</b> — skipped ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)} (${issues.join('; ')}).\nDisable the honeypot check in /settings to ape anyway.`);
         return;
       }
     }
@@ -182,7 +198,8 @@ export class Trader {
     const matches = open.filter((t) => t.mint === ev.mint && !this.sellingRows.has(t.id));
     if (!matches.length) return;
     if (doc.settings.alerts.activity) {
-      await notifyUser(doc.userId, `👻 <b>COPY-SELL TRIGGERED</b> — ${ev.watchedLabel} dumped $${ev.mint.slice(0, 6)}… Mirroring ${matches.length} open position${matches.length > 1 ? 's' : ''}.`);
+      const soldTxt = solExact(ev.spendLamports);
+      await notifyUser(doc.userId, `👻 <b>COPY-SELL TRIGGERED</b> — ${escTag(ev.watchedLabel)} dumped ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)}${soldTxt ? ` (≈ ${soldTxt})` : ''}. Mirroring ${matches.length} open position${matches.length > 1 ? 's' : ''}.`);
     }
     for (const t of matches) {
       await this.sellOpenPosition(doc.userId, t.id, 'COPY_SELL')

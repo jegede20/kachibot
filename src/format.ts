@@ -16,6 +16,27 @@ export function esc(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/** "Name ($SYM)" — HTML-escaped; falls back to a short mint when unknown */
+export function coinTag(name: string | null | undefined, symbol: string | null | undefined, mint?: string): string {
+  const n = esc((name || '').trim());
+  const sym = esc((symbol || '').trim());
+  if (n && sym) return `<b>${n}</b> ($${sym})`;
+  if (sym) return `<b>$${sym}</b>`;
+  if (n) return `<b>${n}</b>`;
+  return mint ? `<code>${esc(mint.slice(0, 6))}…</code>` : 'the token';
+}
+
+/** exact SOL text: "0.1234 SOL" — 4 dp minimum, trailing zeros trimmed */
+export function solExact(lamports: number | null | undefined): string | null {
+  if (lamports === null || lamports === undefined || !Number.isFinite(lamports)) return null;
+  const s = lamports / 1e9;
+  if (s === 0) return '0 SOL';
+  let txt = s.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+  const dp = txt.includes('.') ? txt.split('.')[1].length : 0;
+  if (dp < 4) txt = s.toFixed(4);
+  return `${txt} SOL`;
+}
+
 export function sol(n: number): string {
   const s = n / 1e9;
   return fmtNum(s);

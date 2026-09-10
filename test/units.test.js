@@ -6,7 +6,7 @@ process.env.ENCRYPTION_KEY = 'test-only-key-abcdef';
 
 const { classifyPumpIx, pumpIxArgs } = require('../dist/chain/pump');
 const { validateAndApply, defaultSettings, summarizeTrades, lamportsToSol } = require('../dist/types');
-const { solShort, scorecardText, chartLink, pctSigned } = require('../dist/format');
+const { solShort, scorecardText, chartLink, pctSigned, coinTag, solExact } = require('../dist/format');
 
 const disc = (arr) => Buffer.from(arr);
 
@@ -178,4 +178,25 @@ test('format helpers render safe text', () => {
   assert.ok(card.includes('TRADE CARD #1'));
   assert.ok(card.includes('&lt;Coin&gt;')); // escaped
   assert.ok(card.includes('◎2.000'));
+});
+
+
+test('coinTag always names the coin (full name + ticker, escaped, mint fallback)', () => {
+  assert.strictEqual(coinTag('Dog Wif Hat', 'WIF'), '<b>Dog Wif Hat</b> ($WIF)');
+  assert.strictEqual(coinTag('', 'WIF'), '<b>$WIF</b>');
+  assert.strictEqual(coinTag('Only Name', ''), '<b>Only Name</b>');
+  // brand-new mints have no metadata yet -> short mint fallback, never blank
+  assert.strictEqual(coinTag(null, null, 'AbCdEf1234567890'), '<code>AbCdEf…</code>');
+  // metadata is chain-supplied: must be HTML-escaped
+  assert.strictEqual(coinTag('A<b>B</b>', 'X&Y'), '<b>A&lt;b&gt;B&lt;/b&gt;</b> ($X&amp;Y)');
+});
+
+test('solExact renders the exact SOL amount spent', () => {
+  assert.strictEqual(solExact(123_400_000), '0.1234 SOL');   // 0.1234
+  assert.strictEqual(solExact(5_000_000), '0.0050 SOL');     // 4 dp minimum
+  assert.strictEqual(solExact(1_234_567), '0.001235 SOL');   // rounds to 6 dp
+  assert.strictEqual(solExact(2_000_000_000), '2.0000 SOL');
+  assert.strictEqual(solExact(0), '0 SOL');
+  assert.strictEqual(solExact(null), null);
+  assert.strictEqual(solExact(undefined), null);
 });

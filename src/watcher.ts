@@ -19,8 +19,29 @@ import { UserDoc, WatchedWallet } from './types';
 import { notifyUser } from './notify';
 import { decodeMessageView, allIxs, detectSwapSignals, determineSide, PRIME_STALE_MS, isStaleTx } from './chain/txview';
 import BN from 'bn.js';
+import { getTokenMeta } from './chain/meta';
+import { coinTag, solExact, esc } from './format';
 
 const FETCH_ATTEMPTS = 4;
+
+type MintMetaLite = { at: number; name: string | null; symbol: string | null };
+/** 30-min cache of full token identity so every alert can name the coin */
+const mintMetaLite = new Map<string, MintMetaLite>();
+
+async function resolveMintMeta(conn: Connection, mint: string): Promise<MintMetaLite> {
+  const hit = mintMetaLite.get(mint);
+  if (hit && Date.now() - hit.at < 30 * 60_000) return hit;
+  try {
+    const m = await getTokenMeta(conn, new PublicKey(mint));
+    const rec: MintMetaLite = { at: Date.now(), name: m?.name ?? null, symbol: m?.symbol ?? null };
+    mintMetaLite.set(mint, rec);
+    return rec;
+  } catch {
+    const rec: MintMetaLite = { at: Date.now(), name: null, symbol: null };
+    mintMetaLite.set(mint, rec);
+    return rec;
+  }
+}
 
 class Watcher {
   private store: Store = getStore();
@@ -286,6 +307,11 @@ class Watcher {
     if (!view) return;
     const pkeys = view.pkeys;
     const allIxes = allIxs(view);
+    // exact SOL that left the watched wallet in this tx (buys); negative on sells
+    const watchedIdx = pkeys.indexOf(address);
+    const watchedSolOut = watchedIdx >= 0 && tx.meta
+      ? (tx.meta.preBalances?.[watchedIdx] ?? 0) - (tx.meta.postBalances?.[watchedIdx] ?? 0)
+      : 0;
 
     // ---- pump-program trade detection (live empirical disc table + log names + balance deltas) ----
     const events: Array<{
@@ -399,6 +425,13 @@ class Watcher {
     }
     if (!subscribers.length) return;
 
+    // resolve full coin identity once per mint in this tx
+    const metaByMint = new Map<string, MintMetaLite>();
+    for (const ev of events) {
+      if (metaByMint.has(ev.mint)) continue;
+      metaByMint.set(ev.mint, await resolveMintMeta(this.conn, ev.mint));
+    }
+
     // estimateSpend hits RPC; two users watching the same wallet shouldn't
     // each pay for the same coin twice in one tx
     const spendEstCache = new Map<string, number | null>();
@@ -430,11 +463,16 @@ class Watcher {
         // filters, so it must run on every buy regardless of whether the
         // RADAR alert happens to be enabled (it is off by default).
         let spend: number | null = null;
+        let spentExact: number | null = null;
         if (ev.side === 'buy') {
-          if (ev.solMoved && ev.solMoved > 0) {
-            // off-curve swap: the ape's own SOL out is the truest spend measure
-            spend = ev.solMoved;
+          // exact measures first: the ape's own SOL out (swap path) or the
+          // watched wallet's balance delta in this tx (curve path)
+          if (ev.solMoved && ev.solMoved > 0) spentExact = ev.solMoved;
+          else if (watchedSolOut > 0) spentExact = watchedSolOut;
+          if (spentExact !== null) {
+            spend = spentExact;
           } else if (ev.tokenDeltaRaw !== null) {
+            // paid with a stablecoin / no SOL delta: fall back to curve pricing
             const ck = `${ev.mint}:${ev.tokenDeltaRaw}`;
             if (!spendEstCache.has(ck)) spendEstCache.set(ck, await this.estimateSpend(ev.mint, ev.tokenDeltaRaw));
             spend = spendEstCache.get(ck) ?? null;
@@ -442,9 +480,16 @@ class Watcher {
         }
 
         if (ev.side === 'buy' && settings.alerts.activity) {
-          await notifyUser(sub.userId, `👁 <b>RADAR</b> — ${sub.watch.label} bought $${ev.mint.slice(0, 6)}…${spend !== null ? ` (≈ ${(spend / 1e9).toFixed(4)}◎)` : ''} — mirroring now`, { silent: true });
+          const mm = metaByMint.get(ev.mint);
+          const spentTxt = solExact(spend);
+          await notifyUser(
+            sub.userId,
+            `👁 <b>RADAR</b> — ${esc(sub.watch.label)} bought ${coinTag(mm?.name, mm?.symbol, ev.mint)}${spentTxt ? ` — spent ${spentTxt}` : ''} — mirroring now`,
+            { silent: true },
+          );
         }
 
+        const metaEv = metaByMint.get(ev.mint);
         const signal: WatchSignal = {
           userId: sub.userId,
           watchId: sub.watch.id,
@@ -452,7 +497,10 @@ class Watcher {
           watchedLabel: sub.watch.label,
           side: ev.side,
           mint: ev.mint,
+          mintName: metaEv?.name ?? null,
+          mintSymbol: metaEv?.symbol ?? null,
           spendLamports: spend,
+          spentSolLamports: spentExact,
           tokenAmountRaw: ev.tokenDeltaRaw !== null ? ev.tokenDeltaRaw.toString() : null,
           sig: signature,
           route: `pump:${ev.name}`,
