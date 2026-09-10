@@ -111,14 +111,37 @@ Example: mode **%**, copy **20%**, wallet buys 0.5 SOL → you buy 0.1 SOL.
 ### When to sell
 | Setting | What it does | Default | Allowed |
 |---|---|---|---|
-| **🎯 TP ladder (e.g. 2,3,5)** | Take-profit steps, as multiples of your buy price. With `2,3`: half your position is sold at 2x (100% profit) and the other half at 3x (200% profit). Up to 5 steps. `2,3,5` sells a third at each step. | 2, 3 | multiples of 1.01 – 100 |
+| **🎯 TP ladder (e.g. 2x,3x,5x or more)** | Take-profit steps, as multiples of your buy price. Type them however you like — `2x,3x,5x`, `2,3,5` or `1.5x 4x 10x` all work. With `2x,3x`: half your position is sold at 2x (100% profit) and the other half at 3x (200% profit). Up to 5 steps; they are sorted and de-duplicated for you. | 2x, 3x | any multiples 1.01 – 1000, up to 5 |
 | **🛑 Stop-loss %** | If the price falls this much, everything left is sold automatically. | -50% | 1% – 99% |
-| **👻 copy-sell** | When ON, the bot also mirrors the watched wallet's **sells** — if they dump, you dump. When OFF, you only follow their buys and your own TP/SL rules decide the exits. | OFF | toggle |
+| **👻 copy-sell** | When ON, the bot also mirrors the watched wallet's **sells** — if they dump, you dump (subject to your exit rule below). When OFF, you only follow their buys and your own TP/SL rules decide the exits. | OFF | toggle |
+| **💸 Exit rule** | How a copied position is exited. **Follow** = sell 100% the moment the ape sells · **Sell %** = sell only a slice (e.g. 50%) when it sells · **Hold** = never follow its sells (TP ladder + stop-loss still guard it) · **Sell at X** = ignore its sells and exit the whole bag at your multiple (e.g. 3x) · **Sell at mcap** = exit the whole bag when the coin reaches a market cap (e.g. 100k). Set one default for all wallets here, and/or a different rule per wallet from its watch card. | follow ape | see below |
 | **🛡 honeypot check** | Before buying, the bot tests the token's contract for traps (can't-sell scams, blacklists) and rejects bad ones. Keep it ON. | ON | toggle |
 
 > **A practical starting point:** fixed mode, 0.02–0.05 SOL per buy, slippage 25%, TP ladder `2,3`, stop-loss -50%, caps that match your budget. Copy-buys land *after* the wallet you follow — that's the nature of copy trading: they set the pace, you ride the move.
 
 ---
+
+### Exit rules (💸) — how each copied position is closed
+
+The old copy-sell was all-or-nothing: the watched wallet sold, you sold everything. Now **you choose** how each position exits.
+
+| Rule | What happens when the watched wallet sells | What happens otherwise |
+|---|---|---|
+| 👻 **Follow ape — sell all** | Your whole position is sold (classic copy-sell) | TP ladder + stop-loss still guard it |
+| 🔢 **Sell %** | Only that % of your bag is sold (e.g. 50%) — the rest stays open | TP ladder + stop-loss still guard the rest |
+| 🙌 **Hold** | Nothing — you stay in | TP ladder + stop-loss still guard it |
+| 🎯 **Sell at X** | Nothing — you stay in | Whole bag sold when it hits your multiple (e.g. 3x) |
+| 📈 **Sell at mcap** | Nothing — you stay in | Whole bag sold when the coin hits your market cap (e.g. 100k) |
+
+**Where to set it**
+- **⚙️ Settings → 💸 Exit rule (all wallets)** — your default for every wallet.
+- **👀 Watchlist → tap a wallet → 💸 exit rule** — override for that wallet only (a `↩️ use global default` button puts it back).
+
+**Notes that matter**
+- A rule applies to coins copied **from that wallet** from the moment you set it; open positions keep the rule they were opened with (shown on their card).
+- 🎯 and 📈 targets **replace** the TP ladder for that position — stop-loss and rug protection still apply.
+- Market caps are compared in USD, using a cached SOL price; if the price feed is unreachable for a moment the ladder keeps guarding the position until it recovers.
+- 🙌 Hold and the target rules do **not** need copy-sell to be ON — they are your own exits, not mirrors of the ape.
 
 ## 3. Watchlist (👀) — who you follow
 
@@ -152,7 +175,7 @@ A watched wallet only triggers buys while it's **live** (not paused) and only if
 4. Then it manages the exit:
    - **TP ladder** sells portions as price hits each multiple;
    - **Stop-loss** sells everything if price drops to your limit;
-   - **copy-sell** (if ON) sells when the watched wallet sells;
+   - **copy-sell** (if ON) sells when the watched wallet sells — following your **exit rule** (sell all, a %, or nothing);
    - a **rug guard** watches for liquidity pulls/scams and bails out if detected.
 5. When the position is fully closed you get a **trade card**: bought, sold, PnL in SOL and %, how long it was held, and why it exited (TP / stop-loss / copy-sell / rug / manual).
 

@@ -7,7 +7,7 @@
 import { Keypair, PublicKey, VersionedTransaction, TransactionInstruction } from '@solana/web3.js';
 import BN from 'bn.js';
 import { getStore, Store } from './db';
-import { UserDoc, TradeRow, ExitReason, dayKey } from './types';
+import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit } from './types';
 import {
   curvePhase, fetchCurve, loadPricingCtx, sellSolLamportsForTokenAmount,
   buildCurveBuy, buildCurveSell, mcapSolLamports, priceSolPerTokenLamports,
@@ -15,6 +15,7 @@ import {
 } from './chain/pump';
 import { buildJupiterBuy, buildJupiterSell, quote } from './chain/jupiter';
 import { getConnection } from './chain/conn';
+import { getSolUsd } from './chain/price';
 import { simulate, sendTrade, confirmSignature, toVersioned } from './chain/send';
 import { getTokenMeta, rugFlags, describeRugFlags } from './chain/meta';
 import { decryptSecret, keypairFromSecret } from './crypto';
@@ -97,6 +98,19 @@ function computeBudget(s: UserDoc['settings'], watchedSpend: number | null): num
     budget = s.buyAmountLamports;
   }
   return Math.max(0, Math.min(budget, s.perTradeCapLamports));
+}
+
+/** how many raw tokens to sell for a fraction of the remaining bag (pure, tested) */
+export function tokensForFraction(remaining: bigint, entryTotal: bigint, frac: number): bigint {
+  if (remaining <= 0n) return 0n;
+  const clamped = Math.min(1, Math.max(0.01, frac));
+  const bp = BigInt(Math.round(clamped * 10_000));
+  let tokens = (remaining * bp) / 10_000n;
+  if (tokens <= 0n) tokens = remaining;
+  if (tokens > remaining) tokens = remaining;
+  // never leave an un-sellable dust crumb behind (<1% of the entry bag)
+  if (entryTotal > 0n && remaining - tokens > 0n && remaining - tokens < entryTotal / 100n) tokens = remaining;
+  return tokens;
 }
 
 export class Trader {
@@ -197,13 +211,83 @@ export class Trader {
     const open = await this.store.listTrades(doc.userId, 'open');
     const matches = open.filter((t) => t.mint === ev.mint && !this.sellingRows.has(t.id));
     if (!matches.length) return;
+
+    // the exit rule of the watch that triggered this (override, else global)
+    const watch = ev.watchId ? doc.watched.find((w) => w.id === ev.watchId) || null : null;
+    const exit = resolveExit(doc, watch);
+    const soldTxt = solExact(ev.spendLamports);
+    const what = coinTag(ev.mintName, ev.mintSymbol, ev.mint);
+    const frac = exitSellFraction(exit);
+
+    // hold / mult / mcap: the ape selling is NOT an exit signal for us
+    if (frac <= 0) {
+      if (doc.settings.alerts.activity) {
+        const tail = exit.mode === 'hold'
+          ? 'your rule is <b>hold</b> — nothing sold. TP ladder & stop-loss still guard it.'
+          : `your rule is <b>${describeExit(exit)}</b> — holding until then.`;
+        await notifyUser(doc.userId, `👻 <b>APE SOLD — HOLDING</b> — ${escTag(ev.watchedLabel)} dumped ${what}${soldTxt ? ` (≈ ${soldTxt})` : ''}. ${tail}`);
+      }
+      return;
+    }
+
     if (doc.settings.alerts.activity) {
-      const soldTxt = solExact(ev.spendLamports);
-      await notifyUser(doc.userId, `👻 <b>COPY-SELL TRIGGERED</b> — ${escTag(ev.watchedLabel)} dumped ${coinTag(ev.mintName, ev.mintSymbol, ev.mint)}${soldTxt ? ` (≈ ${soldTxt})` : ''}. Mirroring ${matches.length} open position${matches.length > 1 ? 's' : ''}.`);
+      const size = frac >= 0.999 ? 'all' : `${Math.round(frac * 100)}%`;
+      await notifyUser(
+        doc.userId,
+        `👻 <b>COPY-SELL TRIGGERED</b> — ${escTag(ev.watchedLabel)} dumped ${what}${soldTxt ? ` (≈ ${soldTxt})` : ''}. Selling ${size} of ${matches.length} open position${matches.length > 1 ? 's' : ''}.`,
+      );
     }
     for (const t of matches) {
-      await this.sellOpenPosition(doc.userId, t.id, 'COPY_SELL')
-        .catch((e) => console.error('[trader] copy-sell failed:', (e as Error).message));
+      const job = frac >= 0.999
+        ? this.sellOpenPosition(doc.userId, t.id, 'COPY_SELL')
+        : this.sellFraction(doc.userId, t.id, frac, 'COPY_SELL');
+      await job.catch((e) => console.error('[trader] copy-sell failed:', (e as Error).message));
+    }
+  }
+
+  /** sell a fraction of the REMAINING position (partial copy-sell) */
+  async sellFraction(userId: number, rowId: string, frac: number, reason: ExitReason): Promise<TradeRow | null> {
+    return this.chained(userId, () => this.sellFractionLocked(userId, rowId, frac, reason));
+  }
+
+  private async sellFractionLocked(userId: number, rowId: string, frac: number, reason: ExitReason): Promise<TradeRow | null> {
+    const doc = await this.store.getUser(userId);
+    const wallet = getWallet(doc);
+    if (!wallet) return null;
+    const open = await this.store.listTrades(userId, 'open');
+    const row = open.find((t) => t.id === rowId);
+    if (!row) return null;
+    const remaining = this.remainingTokens(row);
+    if (remaining <= 0n || this.sellingRows.has(row.id)) return row;
+
+    const clamped = Math.min(1, Math.max(0.01, frac));
+    const tokens = tokensForFraction(remaining, BigInt(row.entryTokenAmount), frac);
+
+    this.sellingRows.add(row.id);
+    try {
+      const proceeds = await this.execSell(doc, wallet, row, tokens);
+      await this.recordSell(row, reason, tokens, proceeds, null);
+      await this.closeRowIfDone(row);
+      if (!this.isFullyOut(row) && doc.settings.alerts.sells) {
+        const left = this.remainingTokens(row);
+        const entry = BigInt(row.entryTokenAmount);
+        await notifyUser(userId, `💸 <b>SOLD ${Math.round(clamped * 100)}%</b> — $${row.symbol}: ${(proceeds / 1e9).toFixed(5)}◎ out — ${(Number(left) / Number(entry) * 100).toFixed(0)}% of the bag still open`);
+      }
+      return row;
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (/no sell route|no route|liquidity gone|curve gone|not buyable/i.test(msg)) {
+        await this.recordSell(row, 'RUG', remaining, 0, null, `rug sweep: ${msg}`);
+        await this.closeRowIfDone(row);
+        await notifyUser(userId, `🧨 <b>RUG SWEEP</b> — $${row.symbol}: ${msg.slice(0, 140)}. Position closed at 0.`);
+        return row;
+      }
+      row.error = msg;
+      await this.store.putTrade(row);
+      await notifyUser(userId, `⛔ <b>SELL FAILED</b> — $${row.symbol}: ${msg}\nRetry from 📡 Positions.`);
+      return row;
+    } finally {
+      this.sellingRows.delete(row.id);
     }
   }
 
@@ -230,6 +314,7 @@ export class Trader {
       entryMcapLamports: null,
       walletBalanceBefore: null,
       settingsAtEntry: {
+        exit: resolveExit(doc, doc.watched.find((w) => w.id === ev.watchId) || null),
         tpMultiples: [...s.tpMultiples],
         stopLossPct: s.stopLossPct,
         copySell: s.copySell,
@@ -366,11 +451,11 @@ export class Trader {
   }
 
   /** Full close of one open position (SL, copy-sell, manual, panic, rug). */
-  async sellOpenPosition(userId: number, rowId: string, reason: ExitReason): Promise<TradeRow | null> {
-    return this.chained(userId, () => this.sellOpenPositionLocked(userId, rowId, reason));
+  async sellOpenPosition(userId: number, rowId: string, reason: ExitReason, targetMultiple: number | null = null): Promise<TradeRow | null> {
+    return this.chained(userId, () => this.sellOpenPositionLocked(userId, rowId, reason, targetMultiple));
   }
 
-  private async sellOpenPositionLocked(userId: number, rowId: string, reason: ExitReason): Promise<TradeRow | null> {
+  private async sellOpenPositionLocked(userId: number, rowId: string, reason: ExitReason, targetMultiple: number | null = null): Promise<TradeRow | null> {
     const doc = await this.store.getUser(userId);
     const wallet = getWallet(doc);
     if (!wallet) return null;
@@ -383,7 +468,7 @@ export class Trader {
     this.sellingRows.add(row.id);
     try {
       const proceeds = await this.execSell(doc, wallet, row, remaining);
-      await this.recordSell(row, reason, remaining, proceeds, null);
+      await this.recordSell(row, reason, remaining, proceeds, targetMultiple);
       if (!this.isFullyOut(row)) {
         // e.g. token balance measurement shortfall: keep the rest open but flag it
         row.error = `partial close: ${((remaining - this.remainingTokens(row)) / BigInt(row.entryTokenAmount) * 100n).toString()}% sold`;
@@ -636,6 +721,27 @@ export class Trader {
       await this.sellOpenPosition(userId, row.id, 'RUG');
       return;
     }
+    // target exits: when the user set a multiple or market-cap goal for this
+    // watched wallet, that single target replaces the global TP ladder
+    const exit = normalizeExit(row.settingsAtEntry.exit);
+    if (exit.mode === 'mult' && exit.mult) {
+      if (mult >= exit.mult) await this.sellOpenPosition(userId, row.id, 'TP', exit.mult);
+      return; // an armed multiple target replaces the TP ladder
+    }
+    if (exit.mode === 'mcap' && exit.mcapUsd) {
+      const solUsd = await getSolUsd().catch(() => null);
+      const entryMcap = row.entryMcapLamports;
+      if (solUsd && solUsd > 0 && entryMcap && entryMcap > 0) {
+        // mcap scales with price: entry market cap x the current multiple
+        const currentMcapLamports = entryMcap * mult;
+        const targetLamports = (exit.mcapUsd / solUsd) * 1e9;
+        if (currentMcapLamports >= targetLamports) await this.sellOpenPosition(userId, row.id, 'TP', null);
+        return; // an armed mcap target replaces the TP ladder
+      }
+      // price feed / entry mcap unavailable this tick: fall back to the ladder
+      // so the position is never left without an exit plan
+    }
+
     // TP ladder (ascending rungs, one step per rung)
     for (const target of row.settingsAtEntry.tpMultiples) {
       const rungSold = row.partialSells.some((s) => s.reason === 'TP' && s.multiple >= target * 0.85);

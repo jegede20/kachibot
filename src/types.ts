@@ -9,6 +9,113 @@ export type TradeStatus = 'open' | 'closed' | 'failed';
 
 export interface AlertsConfig { snipes: boolean; sells: boolean; activity: boolean; }
 
+/* --------------------------- exit strategies ---------------------------- */
+/**
+ * How KACHIBOT exits a copied position.
+ *  follow — sell 100% the moment the watched wallet sells (classic copy-sell)
+ *  pct    — sell a chosen % of the position when the watched wallet sells
+ *  hold   — never follow the ape's sells (TP ladder + stop-loss still guard)
+ *  mult   — ignore the ape's sells, exit the whole bag at a chosen multiple
+ *  mcap   — ignore the ape's sells, exit the whole bag at a target market cap
+ */
+export type ExitMode = 'follow' | 'pct' | 'hold' | 'mult' | 'mcap';
+
+export interface ExitConfig {
+  mode: ExitMode;
+  /** 'pct': fraction (0.01..1) of the remaining position sold when the ape sells */
+  pct: number;
+  /** 'mult': target multiple — 3 means sell everything at 3x */
+  mult: number | null;
+  /** 'mcap': target market cap in USD */
+  mcapUsd: number | null;
+}
+
+export const EXIT_DEFAULT: ExitConfig = { mode: 'follow', pct: 1, mult: null, mcapUsd: null };
+
+const EXIT_MODES: ExitMode[] = ['follow', 'pct', 'hold', 'mult', 'mcap'];
+
+export function isExitMode(x: unknown): x is ExitMode {
+  return typeof x === 'string' && (EXIT_MODES as string[]).includes(x);
+}
+
+/** coerce anything (missing / legacy / corrupted doc) into a valid ExitConfig */
+export function normalizeExit(cfg: unknown): ExitConfig {
+  if (!cfg || typeof cfg !== 'object') return { ...EXIT_DEFAULT };
+  const c = cfg as Partial<ExitConfig>;
+  if (!isExitMode(c.mode)) return { ...EXIT_DEFAULT };
+  const pctRaw = Number(c.pct);
+  const pct = Number.isFinite(pctRaw) ? Math.min(1, Math.max(0.01, pctRaw)) : 1;
+  const multRaw = c.mult === null || c.mult === undefined ? null : Number(c.mult);
+  const mcapRaw = c.mcapUsd === null || c.mcapUsd === undefined ? null : Number(c.mcapUsd);
+  return {
+    mode: c.mode,
+    pct,
+    mult: multRaw !== null && Number.isFinite(multRaw) && multRaw > 0 ? multRaw : null,
+    mcapUsd: mcapRaw !== null && Number.isFinite(mcapRaw) && mcapRaw > 0 ? mcapRaw : null,
+  };
+}
+
+/** per-watch override wins, otherwise the user's global default */
+export function resolveExit(doc: { settings: UserSettings }, watch?: { exit?: ExitConfig | null } | null): ExitConfig {
+  if (watch && watch.exit) return normalizeExit(watch.exit);
+  return normalizeExit(doc.settings.exit);
+}
+
+/** fraction of the REMAINING position to sell when the watched wallet sells */
+export function exitSellFraction(cfg: ExitConfig): number {
+  if (cfg.mode === 'follow') return 1;
+  if (cfg.mode === 'pct') return Math.min(1, Math.max(0.01, cfg.pct));
+  return 0; // hold / mult / mcap: the ape's sell is not an exit signal
+}
+
+export function formatMcapUsd(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(v) || v <= 0) return '—';
+  const trim = (x: number, d: number): string => x.toFixed(d).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+  if (v >= 1e9) return `$${trim(v / 1e9, 2)}b`;
+  if (v >= 1e6) return `$${trim(v / 1e6, 2)}m`;
+  if (v >= 1e3) return `$${trim(v / 1e3, 1)}k`;
+  return `$${Math.round(v)}`;
+}
+
+/** one-line human description used on cards and menus */
+export function describeExit(cfg: ExitConfig): string {
+  switch (cfg.mode) {
+    case 'follow': return 'follow ape — sell all';
+    case 'pct': return `sell ${Math.round(cfg.pct * 100)}% when ape sells`;
+    case 'hold': return 'hold — ignore ape sells';
+    case 'mult': return `sell all at ${cfg.mult ? `${cfg.mult}x` : '—'}`;
+    case 'mcap': return `sell all at ${formatMcapUsd(cfg.mcapUsd)} mcap`;
+    default: return 'follow ape — sell all';
+  }
+}
+
+/** parse the value the user types for a given exit mode */
+export function parseExitInput(
+  mode: ExitMode,
+  raw: string,
+): { ok: true; cfg: ExitConfig } | { ok: false; error: string } {
+  const v = raw.trim().toLowerCase().replace(/\s+/g, '');
+  if (mode === 'follow' || mode === 'hold') return { ok: true, cfg: { ...EXIT_DEFAULT, mode } };
+  if (mode === 'pct') {
+    const n = Number(v.replace(/%$/, ''));
+    if (!Number.isFinite(n) || n < 1 || n > 100) return { ok: false, error: 'enter a percentage between 1 and 100 (e.g. 50)' };
+    return { ok: true, cfg: { mode: 'pct', pct: Math.min(1, n / 100), mult: null, mcapUsd: null } };
+  }
+  if (mode === 'mult') {
+    const n = Number(v.replace(/x$/, ''));
+    if (!Number.isFinite(n) || n < 1.01 || n > 1000) return { ok: false, error: 'enter a multiple ≥1.01 (e.g. 3x)' };
+    return { ok: true, cfg: { mode: 'mult', pct: 1, mult: n, mcapUsd: null } };
+  }
+  // mcap: 100k / 1.5m / 2b / 69000 / $69,000
+  const m = v.replace(/[$,\s]/g, '').match(/^([0-9]*\.?[0-9]+)([kmb])?$/);
+  if (!m) return { ok: false, error: 'enter a market cap like 100k, 1.5m or 69000' };
+  const base = Number(m[1]);
+  const scale = m[2] === 'b' ? 1e9 : m[2] === 'm' ? 1e6 : m[2] === 'k' ? 1e3 : 1;
+  const usd = base * scale;
+  if (!Number.isFinite(usd) || usd <= 0) return { ok: false, error: 'enter a market cap like 100k, 1.5m or 69000' };
+  return { ok: true, cfg: { mode: 'mcap', pct: 1, mult: null, mcapUsd: usd } };
+}
+
 export interface UserSettings {
   buyMode: BuyMode;
   /** lamports of SOL per snipe in fixed mode */
@@ -25,6 +132,8 @@ export interface UserSettings {
   stopLossPct: number;
   /** copy the watched wallet's sells too */
   copySell: boolean;
+  /** global default exit rule; a watched wallet can override it */
+  exit: ExitConfig;
   /** ignore watched buys smaller than this (lamports) */
   minSpendLamports: number;
   /** ignore watched buys larger than this (lamports) */
@@ -51,6 +160,8 @@ export interface WatchedWallet {
   pausedAt?: number;
   /** last time this wallet's buy was seen on-chain (live watcher stamps it) */
   lastBuySeenAt?: number;
+  /** per-wallet exit rule; null/absent = inherit the global default */
+  exit?: ExitConfig | null;
 }
 
 /** one stored Solana wallet inside a user's vault (multi-wallet supported) */
@@ -119,6 +230,8 @@ export interface TradeRow {
     copySell: boolean;
     slippagePct: number;
     maxFeeLamports: number;
+    /** exit rule snapshot at entry (per-watch override resolved) */
+    exit?: ExitConfig | null;
   };
   partialSells: PartialSell[];
   status: TradeStatus;
@@ -226,12 +339,13 @@ export function validateAndApply(path: string, rawValue: string, s: UserSettings
       return e ? { ok: false, error: e } : { ok: true, applied: `${num} SOL/tx` };
     }
     case 'tp_multiples': {
-      const parts = v.split(/[\s,]+/).map(Number);
-      if (!parts.length || parts.some((p) => !Number.isFinite(p) || p < 1.01 || p > 100)) {
-        return { ok: false, error: 'list multiples ≥1.01 separated by commas, e.g. 2, 3' };
+      // accepts "2,3", "2x, 3x", "1.5x 2x 10x"
+      const parts = v.split(/[\s,]+/).map((p) => Number(p.replace(/x$/i, '')));
+      if (!parts.length || parts.some((p) => !Number.isFinite(p) || p < 1.01 || p > 1000)) {
+        return { ok: false, error: 'multiples ≥1.01 separated by commas — e.g. 2x, 3x, 5x (max 5 rungs)' };
       }
       s.tpMultiples = [...new Set(parts)].sort((a, b) => a - b).slice(0, 5);
-      return { ok: true, applied: `${s.tpMultiples.map((m) => `${m}x`).join(', ')}` };
+      return { ok: true, applied: `TP ladder: ${s.tpMultiples.map((m) => `${m}x`).join(', ')}` };
     }
     case 'stop_loss': {
       const e = setNum(0.01, 0.99, (x) => { s.stopLossPct = x; });

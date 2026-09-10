@@ -90,6 +90,7 @@ export const DEFAULT_SETTINGS = {
   tpMultiples: [2, 3], // exit each 50% of position at 2x and 3x
   stopLossPct: 0.5, // sell everything at -50%
   copySell: false,
+  exit: { mode: 'follow' as const, pct: 1, mult: null, mcapUsd: null },
   minSpendLamports: 100_000, // ignore watched buys smaller than this
   maxSpendLamports: 100_000_000_000, // ignore watched buys bigger than this (lamports)
   dailyCapLamports: 500_000_000, // 0.5 SOL / day per user

@@ -8,7 +8,11 @@ import { Telegraf, Markup, Context } from 'telegraf';
 import { PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { getConnection } from './chain/conn';
 import { getStore } from './db';
-import { UserDoc, WalletRecord, summarizeTrades, validateAndApply } from './types';
+import {
+  UserDoc, WalletRecord, summarizeTrades, validateAndApply,
+  resolveExit, normalizeExit, describeExit, parseExitInput, formatMcapUsd, EXIT_DEFAULT,
+  type ExitConfig, type ExitMode,
+} from './types';
 import { trader, bustWalletCache } from './trader';
 import { watcher } from './watcher';
 import { registerNotifier } from './notify';
@@ -32,7 +36,7 @@ const SETTING_LABELS: Array<[string, string]> = [
   ['📊 Copy % of watched spend', 'buy_pct'],
   ['💧 Slippage %', 'slippage'],
   ['⚡ Fee cap per tx (SOL)', 'fee_cap'],
-  ['🎯 TP ladder (e.g. 2,3,5)', 'tp_multiples'],
+  ['🎯 TP ladder (e.g. 2x,3x,5x or more)', 'tp_multiples'],
   ['🛑 Stop-loss %', 'stop_loss'],
   ['📏 Min-spend filter (SOL)', 'min_spend'],
   ['📏 Max-spend filter (SOL)', 'max_spend'],
@@ -52,6 +56,7 @@ function settingsSummary(s: UserDoc['settings']): string {
     `🎯 TP ladder: <b>${s.tpMultiples.length ? s.tpMultiples.map((m) => `${m}x`).join(', ') : 'off'}</b>`,
     `🛑 stop-loss: <b>-${Math.round(s.stopLossPct * 100)}%</b>`,
     `👻 copy-sell: <b>${s.copySell ? 'ON' : 'off'}</b>`,
+    `💸 exit rule: <b>${describeExit(normalizeExit(s.exit))}</b>`,
     `📏 spend window: <b>${sol(s.minSpendLamports)}–${sol(s.maxSpendLamports)}</b>`,
     `🪫 caps: <b>${sol(s.perTradeCapLamports)}/trade · ${sol(s.dailyCapLamports)}/day</b>`,
     `⏱ cooldown: <b>${Math.round(s.watcherCooldownMs / 1000)}s</b>`,
@@ -226,6 +231,7 @@ export class KachiBot {
       B(`👻 copy-sell ${s.copySell ? '✅' : '⬜'}`, 's:copySell'),
       B(`🛡 honeypot ${s.honeypotCheck ? '✅' : '⬜'}`, 's:honeypot'),
     ));
+    kbRows.push(row(B('💸 Exit rule (all wallets)', 's:exit')));
     kbRows.push(row(B('🔙 Main', 'm:main')));
     await this.answer(ctx, `⚙️ <b>TRADING SETTINGS</b>\n\n${settingsSummary(s)}\n\nTap to change:`, { kb: this.kb(kbRows) });
   }
@@ -236,7 +242,7 @@ export class KachiBot {
       case 'buy_pct': return `${Math.round(s.buyPctOfSpend * 100)}%`;
       case 'slippage': return `${Math.round(s.slippagePct * 100)}%`;
       case 'fee_cap': return sol(s.maxFeeLamports);
-      case 'tp_multiples': return s.tpMultiples.join(', ');
+      case 'tp_multiples': return s.tpMultiples.map((m) => `${m}x`).join(', ');
       case 'stop_loss': return `${Math.round(s.stopLossPct * 100)}%`;
       case 'min_spend': return sol(s.minSpendLamports);
       case 'max_spend': return sol(s.maxSpendLamports);
@@ -529,19 +535,71 @@ export class KachiBot {
       ? `⏸ paused${w.pausedAt ? ` for ${durMs(Math.max(0, Date.now() - w.pausedAt))}` : ''} · watched ${since} total`
       : `⏱ watching for ${since} · 🟢 live`;
     const buyLine = w.lastBuySeenAt ? `🕓 last buy seen ${ago(w.lastBuySeenAt)}` : null;
+    const exitCfg = resolveExit(doc, w);
+    const exitLine = `💸 exit: <b>${describeExit(exitCfg)}</b>${w.exit ? '' : ' (default)'}`;
     const text = [
       `👁 <b>${escTag(w.label)}</b>`,
       `Address: <code>${w.address}</code>`,
       w.source === 'pumpfun' ? 'source: pump.fun link' : '',
       statusLine,
       buyLine,
+      exitLine,
       perf,
     ].filter(Boolean).join('\n');
     const kb = this.kb([
       row(B(w.paused ? '▶️ resume' : '⏸ pause', `wv:${w.id}:pause`), B('🗑 remove', `wv:${w.id}:remove`)),
+      row(B('💸 exit rule', `ex:${w.id}:menu`)),
       row(B('🔙 Watchlist', 'm:watch')),
     ]);
     await this.answer(ctx, text, { kb });
+  }
+
+  /* ------------------------------ exit rules ------------------------------ */
+
+  /** exit-rule menu: scope 'g' = global default, otherwise a watched wallet id */
+  private async showExitMenu(ctx: Context, scope: string): Promise<void> {
+    const doc = await this.docFor(this.uid(ctx));
+    const isGlobal = scope === 'g';
+    const watch = isGlobal ? null : doc.watched.find((x) => x.id === scope) || null;
+    if (!isGlobal && !watch) { await ctx.reply('target gone', HTML); return; }
+    const current = isGlobal ? normalizeExit(doc.settings.exit) : resolveExit(doc, watch);
+    const mark = (m: ExitMode): string => (current.mode === m ? ' ✅' : '');
+    const val = (m: ExitMode): string => {
+      if (m === 'pct' && current.mode === 'pct') return ` — ${Math.round(current.pct * 100)}%`;
+      if (m === 'mult' && current.mode === 'mult' && current.mult) return ` — ${current.mult}x`;
+      if (m === 'mcap' && current.mode === 'mcap' && current.mcapUsd) return ` — ${formatMcapUsd(current.mcapUsd)}`;
+      return '';
+    };
+    const kbRows: BtnRow[] = [
+      row(B(`👻 follow ape — sell all${mark('follow')}`, `ex:${scope}:follow`)),
+      row(B(`🔢 sell % when ape sells${mark('pct')}${val('pct')}`, `ex:${scope}:pct`)),
+      row(B(`🙌 hold — ignore ape sells${mark('hold')}`, `ex:${scope}:hold`)),
+      row(B(`🎯 sell all at an X${mark('mult')}${val('mult')}`, `ex:${scope}:mult`)),
+      row(B(`📈 sell all at mcap${mark('mcap')}${val('mcap')}`, `ex:${scope}:mcap`)),
+    ];
+    if (!isGlobal) kbRows.push(row(B('↩️ use global default', `ex:${scope}:inherit`)));
+    kbRows.push(row(B(isGlobal ? '🔙 Settings' : '🔙 Target', isGlobal ? 'm:settings' : `wv:${scope}`)));
+
+    const where = isGlobal ? 'default for every watched wallet' : `for ${escTag(watch ? watch.label : '')}`;
+    const inherited = !isGlobal && !watch?.exit;
+    const text = [
+      `💸 <b>EXIT RULE</b> — ${where}`,
+      '',
+      `current: <b>${describeExit(current)}</b>${inherited ? ' (inherited from your global default)' : ''}`,
+      '',
+      '👻 follow — mirror the ape: sell 100% the moment it sells',
+      '🔢 sell % — sell only a slice of the bag when it sells',
+      '🙌 hold — never follow its sells (TP ladder & stop-loss still guard)',
+      '🎯 / 📈 — ignore its sells and exit the whole bag at your own X or market cap',
+      '',
+      'Applies to coins copied from this wallet going forward.',
+    ].join('\n');
+    await this.answer(ctx, text, { kb: this.kb(kbRows) });
+  }
+
+  private async afterExitChange(ctx: Context, scope: string): Promise<void> {
+    if (scope === 'g') { await this.showSettings(ctx); return; }
+    await this.watchDetail(ctx, scope);
   }
 
   /* ------------------------------- positions ------------------------------ */
@@ -702,6 +760,9 @@ export class KachiBot {
       await this.cbText(ctx, `honeypot check ${doc.settings.honeypotCheck ? 'ON' : 'OFF'}`);
       await this.showSettings(ctx);
     });
+    on('s:exit', async (ctx) => {
+      await this.showExitMenu(ctx, 'g');
+    });
     on('s:set', async (ctx, rest) => {
       const pair = SETTING_LABELS.find(([, k]) => k === rest);
       if (!pair) return;
@@ -709,6 +770,46 @@ export class KachiBot {
       this.pending.set(this.uid(ctx), { expect: `setting:${rest}` });
       await this.cbText(ctx, 'enter value');
       await this.answer(ctx, `⚙️ <b>${pair[0]}</b>\ncurrent: ${this.currentValue(doc.settings, rest)}\n\nType the new value (or /cancel):`);
+    });
+
+    // exit rules: ex:<scope>:<action> (scope 'g' = global default)
+    on('ex', async (ctx, rest) => {
+      const parts = rest.split(':');
+      const scope = parts[0];
+      const action = parts[1] || 'menu';
+      const userId = this.uid(ctx);
+      const doc = await this.docFor(userId);
+      if (action === 'menu') { await this.showExitMenu(ctx, scope); return; }
+
+      const watch = scope === 'g' ? null : doc.watched.find((x) => x.id === scope) || null;
+      if (scope !== 'g' && !watch) { await ctx.reply('target gone', HTML); return; }
+
+      if (action === 'inherit') {
+        if (!watch) return;
+        watch.exit = null;
+        await this.saveDoc(doc);
+        await this.cbText(ctx, 'using global default');
+        await this.showExitMenu(ctx, scope);
+        return;
+      }
+      const mode = action as ExitMode;
+      if (mode !== 'follow' && mode !== 'hold') {
+        // needs a value from the user
+        const prompts: Record<string, string> = {
+          pct: 'Type the % of the bag to sell when this wallet sells (1–100), e.g. 50',
+          mult: 'Type the multiple to sell the whole bag at, e.g. 3x',
+          mcap: 'Type the market cap to sell the whole bag at, e.g. 100k / 1.5m',
+        };
+        this.pending.set(userId, { expect: `exitval:${scope}:${mode}` });
+        await this.cbText(ctx, 'enter value');
+        await this.answer(ctx, `💸 <b>EXIT RULE</b>\n\n${prompts[mode]}\n\n(or /cancel)`);
+        return;
+      }
+      const cfg: ExitConfig = { ...EXIT_DEFAULT, mode };
+      if (watch) watch.exit = cfg; else doc.settings.exit = cfg;
+      await this.saveDoc(doc);
+      await this.cbText(ctx, describeExit(cfg));
+      await this.showExitMenu(ctx, scope);
     });
 
     // wallet
@@ -942,6 +1043,25 @@ export class KachiBot {
           await this.saveDoc(doc);
           await ctx.reply(`✅ <b>${res.applied}</b>`, HTML);
           await this.showSettings(ctx);
+          return;
+        }
+        if (stage.expect.startsWith('exitval:')) {
+          const [, scope, mode] = stage.expect.split(':');
+          const parsed = parseExitInput(mode as ExitMode, text);
+          if (!parsed.ok) {
+            await ctx.reply(`❌ ${parsed.error} — try again or /cancel.`, HTML);
+            this.pending.set(userId, stage);
+            return;
+          }
+          if (scope === 'g') doc.settings.exit = parsed.cfg;
+          else {
+            const w = doc.watched.find((x) => x.id === scope);
+            if (!w) { await ctx.reply('target gone', HTML); return; }
+            w.exit = parsed.cfg;
+          }
+          await this.saveDoc(doc);
+          await ctx.reply(`✅ exit rule: <b>${describeExit(parsed.cfg)}</b>`, HTML);
+          await this.afterExitChange(ctx, scope);
           return;
         }
         if (stage.expect === 'watch_add') { await this.addWatch(ctx, text); return; }

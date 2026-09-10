@@ -5,7 +5,11 @@ const assert = require('node:assert');
 process.env.ENCRYPTION_KEY = 'test-only-key-abcdef';
 
 const { classifyPumpIx, pumpIxArgs } = require('../dist/chain/pump');
-const { validateAndApply, defaultSettings, summarizeTrades, lamportsToSol } = require('../dist/types');
+const {
+  validateAndApply, defaultSettings, summarizeTrades, lamportsToSol,
+  resolveExit, normalizeExit, describeExit, exitSellFraction, parseExitInput,
+  formatMcapUsd, EXIT_DEFAULT,
+} = require('../dist/types');
 const { solShort, scorecardText, chartLink, pctSigned, coinTag, solExact } = require('../dist/format');
 
 const disc = (arr) => Buffer.from(arr);
@@ -199,4 +203,105 @@ test('solExact renders the exact SOL amount spent', () => {
   assert.strictEqual(solExact(0), '0 SOL');
   assert.strictEqual(solExact(null), null);
   assert.strictEqual(solExact(undefined), null);
+});
+
+
+test('TP ladder setting accepts what the menu now asks for (2x,3x,5x or more)', () => {
+  const s = defaultSettings();
+  let r = validateAndApply('tp_multiples', '2x,3x,5x', s);
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(s.tpMultiples, [2, 3, 5]);
+
+  r = validateAndApply('tp_multiples', '1.5x 4x 10x', s);
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(s.tpMultiples, [1.5, 4, 10]);
+
+  // still accepts the old bare-number form
+  r = validateAndApply('tp_multiples', '2, 3', s);
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(s.tpMultiples, [2, 3]);
+
+  // sorted, deduped, max 5 rungs
+  r = validateAndApply('tp_multiples', '5x,2x,2x,3x,4x,6x,7x', s);
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(s.tpMultiples, [2, 3, 4, 5, 6]);
+
+  // rejects nonsense (< 1.01)
+  assert.strictEqual(validateAndApply('tp_multiples', '0.5x', s).ok, false);
+  assert.strictEqual(validateAndApply('tp_multiples', 'abc', s).ok, false);
+  assert.strictEqual(validateAndApply('tp_multiples', '', s).ok, false);
+});
+
+test('exit rules: per-watch override wins, otherwise the global default', () => {
+  const s = defaultSettings();
+  s.exit = { mode: 'pct', pct: 0.25, mult: null, mcapUsd: null };
+  const doc = { settings: s, watched: [] };
+  // no override -> global
+  assert.deepStrictEqual(resolveExit(doc, { exit: null }), { mode: 'pct', pct: 0.25, mult: null, mcapUsd: null });
+  assert.deepStrictEqual(resolveExit(doc, undefined), { mode: 'pct', pct: 0.25, mult: null, mcapUsd: null });
+  // override wins
+  assert.deepStrictEqual(resolveExit(doc, { exit: { mode: 'hold', pct: 1, mult: null, mcapUsd: null } }).mode, 'hold');
+  // legacy/corrupt docs never crash
+  assert.deepStrictEqual(normalizeExit(undefined), EXIT_DEFAULT);
+  assert.deepStrictEqual(normalizeExit({ mode: 'nonsense' }), EXIT_DEFAULT);
+  assert.deepStrictEqual(normalizeExit('junk'), EXIT_DEFAULT);
+});
+
+test('exitSellFraction: follow sells all, pct sells a slice, targets ignore the ape', () => {
+  assert.strictEqual(exitSellFraction({ mode: 'follow', pct: 1, mult: null, mcapUsd: null }), 1);
+  assert.strictEqual(exitSellFraction({ mode: 'pct', pct: 0.5, mult: null, mcapUsd: null }), 0.5);
+  assert.strictEqual(exitSellFraction({ mode: 'pct', pct: 5, mult: null, mcapUsd: null }), 1); // clamped
+  assert.strictEqual(exitSellFraction({ mode: 'hold', pct: 1, mult: null, mcapUsd: null }), 0);
+  assert.strictEqual(exitSellFraction({ mode: 'mult', pct: 1, mult: 3, mcapUsd: null }), 0);
+  assert.strictEqual(exitSellFraction({ mode: 'mcap', pct: 1, mult: null, mcapUsd: 100000 }), 0);
+});
+
+test('exit value parser handles the formats users actually type', () => {
+  assert.deepStrictEqual(parseExitInput('follow', ''), { ok: true, cfg: { ...EXIT_DEFAULT, mode: 'follow' } });
+  assert.deepStrictEqual(parseExitInput('hold', ''), { ok: true, cfg: { ...EXIT_DEFAULT, mode: 'hold' } });
+  // percent
+  assert.strictEqual(parseExitInput('pct', '50').cfg.pct, 0.5);
+  assert.strictEqual(parseExitInput('pct', '50%').cfg.pct, 0.5);
+  assert.strictEqual(parseExitInput('pct', '0').ok, false);
+  assert.strictEqual(parseExitInput('pct', '150').ok, false);
+  // multiple
+  assert.strictEqual(parseExitInput('mult', '3x').cfg.mult, 3);
+  assert.strictEqual(parseExitInput('mult', '10').cfg.mult, 10);
+  assert.strictEqual(parseExitInput('mult', '1').ok, false); // <1.01 makes no sense
+  // market cap
+  assert.strictEqual(parseExitInput('mcap', '100k').cfg.mcapUsd, 100_000);
+  assert.strictEqual(parseExitInput('mcap', '1.5m').cfg.mcapUsd, 1_500_000);
+  assert.strictEqual(parseExitInput('mcap', '2b').cfg.mcapUsd, 2_000_000_000);
+  assert.strictEqual(parseExitInput('mcap', '$69,000').cfg.mcapUsd, 69_000);
+  assert.strictEqual(parseExitInput('mcap', 'abc').ok, false);
+});
+
+test('exit rules read cleanly on cards and format market caps compactly', () => {
+  assert.strictEqual(describeExit({ mode: 'follow', pct: 1, mult: null, mcapUsd: null }), 'follow ape — sell all');
+  assert.strictEqual(describeExit({ mode: 'pct', pct: 0.5, mult: null, mcapUsd: null }), 'sell 50% when ape sells');
+  assert.strictEqual(describeExit({ mode: 'hold', pct: 1, mult: null, mcapUsd: null }), 'hold — ignore ape sells');
+  assert.strictEqual(describeExit({ mode: 'mult', pct: 1, mult: 3, mcapUsd: null }), 'sell all at 3x');
+  assert.strictEqual(describeExit({ mode: 'mcap', pct: 1, mult: null, mcapUsd: 100000 }), 'sell all at $100k mcap');
+  assert.strictEqual(formatMcapUsd(1500), '$1.5k');
+  assert.strictEqual(formatMcapUsd(69000), '$69k');
+  assert.strictEqual(formatMcapUsd(1_500_000), '$1.5m');
+  assert.strictEqual(formatMcapUsd(2_000_000_000), '$2b');
+  assert.strictEqual(formatMcapUsd(null), '—');
+});
+
+test('partial sell math: exact shares and no dust crumbs left behind', () => {
+  const { tokensForFraction } = require('../dist/trader');
+  assert.strictEqual(tokensForFraction(1000n, 1000n, 0.5), 500n);
+  assert.strictEqual(tokensForFraction(1000n, 1000n, 1), 1000n);
+  assert.strictEqual(tokensForFraction(1000n, 1000n, 0.25), 250n);
+  // odd numbers round down, never over-sell
+  assert.strictEqual(tokensForFraction(7n, 7n, 0.5), 3n);
+  // leftovers under 1% of the bag are swept in instead of stranded
+  assert.strictEqual(tokensForFraction(1000n, 10_000n, 0.995), 1000n);
+  // tiny bags still sell at least one unit
+  assert.strictEqual(tokensForFraction(1n, 1000n, 0.01), 1n);
+  assert.strictEqual(tokensForFraction(0n, 1000n, 0.5), 0n);
+  // out-of-range fractions are clamped, never negative or oversized
+  assert.strictEqual(tokensForFraction(1000n, 1000n, 5), 1000n);
+  assert.strictEqual(tokensForFraction(1000n, 1000n, -1), 10n);
 });
