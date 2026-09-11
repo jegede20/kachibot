@@ -74,6 +74,14 @@ async function main(): Promise<void> {
             startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
             ts: Date.now(),
             watcher: w,
+            trader: (() => {
+              const c = trader.checkerState();
+              return {
+                checkerRunning: c.running,
+                lastCheckAgeSec: c.lastTickAt ? Math.round((Date.now() - c.lastTickAt) / 1000) : null,
+                lastCheckMs: c.lastPassMs,
+              };
+            })(),
           }));
         })
         .catch((e: Error) => {

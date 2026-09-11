@@ -138,6 +138,8 @@ export class Trader {
   private knownUsers = new Set<number>();
   private checkerTimer: NodeJS.Timeout | null = null;
   private sellingRows = new Set<string>();
+  private lastCheckTickAt = 0;
+  private lastCheckPassMs: number | null = null;
   /** in-memory peak multiple per open row (drives the trailing stop) */
   private peaks = new Map<string, number>();
   /** throttles for the low-balance heads-up */
@@ -935,13 +937,32 @@ export class Trader {
     if (typeof this.checkerTimer.unref === 'function') this.checkerTimer.unref();
   }
 
+  /** heartbeat of the exit checker, for /status: { running, lastTickAgeSec, lastPassMs } */
+  checkerState(): { running: boolean; lastTickAt: number | null; lastPassMs: number | null } {
+    return {
+      running: this.checkerTimer !== null,
+      lastTickAt: this.lastCheckTickAt || null,
+      lastPassMs: this.lastCheckPassMs,
+    };
+  }
+
   private async checkOpenPositions(): Promise<void> {
+    const startedAt = Date.now();
+    this.lastCheckTickAt = startedAt;
     let users: UserDoc[] = [];
     try {
       users = await this.store.listUsers();
     } catch {
       users = [...this.knownUsers].map((u) => ({ userId: u } as UserDoc));
     }
+    try {
+      await this.checkOpenPositionsInner(users);
+    } finally {
+      this.lastCheckPassMs = Date.now() - startedAt;
+    }
+  }
+
+  private async checkOpenPositionsInner(users: UserDoc[]): Promise<void> {
     for (const doc of users) {
       const userId = doc.userId;
       try {
