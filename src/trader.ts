@@ -330,7 +330,9 @@ export class Trader {
   private async handleWatchedSell(doc: UserDoc, ev: WatchSignal): Promise<void> {
     if (!doc.settings.copySell) return;
     const open = await this.store.listTrades(doc.userId, 'open');
-    const matches = open.filter((t) => t.mint === ev.mint && !this.sellingRows.has(t.id));
+    // outOfSync rows hold tokens the wallet no longer has — selling them is a
+    // guaranteed failure, so the 🧹 button (not a copy-sell) closes those.
+    const matches = open.filter((t) => t.mint === ev.mint && !t.outOfSync && !this.sellingRows.has(t.id));
     if (!matches.length) return;
 
     // the exit rule of the watch that triggered this (override, else global)
@@ -369,7 +371,15 @@ export class Trader {
       const job = frac >= 0.999
         ? this.sellOpenPosition(doc.userId, t.id, 'COPY_SELL')
         : this.sellFraction(doc.userId, t.id, frac, 'COPY_SELL');
-      await job.catch((e) => console.error('[trader] copy-sell failed:', (e as Error).message));
+      await job.catch(async (e) => {
+        const why = (e as Error).message;
+        console.error('[trader] copy-sell failed:', why);
+        // never leave the user thinking it sold — TP / SL still guard the bag
+        await notifyUser(
+          doc.userId,
+          `⚠️ <b>COPY-SELL FAILED</b> — ${what} did not sell: ${escTag(why.slice(0, 140))}\n\nYour position is still open; the TP ladder and stop-loss keep watching it. You can also sell by hand in 📡 Positions.`,
+        ).catch(() => undefined);
+      });
     }
   }
 
