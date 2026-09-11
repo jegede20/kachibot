@@ -456,6 +456,9 @@ export interface TradeRow {
   realizedQuoteLamports: number | null;  // total SOL received (all sells)
   exitPriceLamports: number | null;      // volume-weighted avg exit price
   walletBalanceAfter: number | null;
+  /** set when the wallet no longer holds what this row thinks we own (sold or moved outside the bot) */
+  outOfSync?: boolean;
+  outOfSyncAt?: number | null;
   pnlLamports: number | null;            // realized - spent
   pnlPct: number | null;                 // pnl / spent
   netMultiple: number | null;            // realized / spent (gross X)
@@ -512,6 +515,21 @@ export interface PnlStats {
   firstTradeAt: number | null;
   /** snipes that never filled (failed) — shown so the card is honest early on */
   failed: number;
+}
+
+/**
+ * Does the chain agree with our books?
+ *  - 'ok'      wallet holds everything we expect
+ *  - 'partial' some of the bag left the wallet without going through us
+ *  - 'gone'    the bag is empty but the row still claims tokens
+ *  - 'unknown' we could not read the balance (RPC hiccup) — leave the row alone
+ */
+export function holdingDivergence(expected: bigint | null, actual: bigint | null): 'ok' | 'partial' | 'gone' | 'unknown' {
+  if (expected === null || actual === null) return 'unknown';
+  if (expected <= 0n) return 'ok';
+  if (actual <= 0n) return 'gone';
+  if (actual < expected) return 'partial';
+  return 'ok';
 }
 
 /**

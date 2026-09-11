@@ -8,6 +8,24 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { HELIUS_DAS_URL } from '../config';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from './pump';
 
+/**
+ * Raw token supply from raw mint-account bytes.
+ * SPL and Token-2022 share the same Mint layout: mint_authority (36 bytes),
+ * then supply as a **little-endian u64** at offset 36. Reading it big-endian
+ * (a mistake we shipped once) inflates it by ~4 orders of magnitude and turns
+ * every market cap into nonsense.
+ */
+export function mintSupplyRaw(data: Uint8Array | Buffer | null | undefined): number | null {
+  if (!data || data.length < 45) return null;
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  try {
+    const v = buf.readBigUInt64LE(36);
+    return Number(v);
+  } catch {
+    return null;
+  }
+}
+
 export const METAPLEX_META = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
 
 export interface TokenMeta {

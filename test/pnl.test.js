@@ -245,3 +245,24 @@ test('positionScorecardText: shows value, entry vs now mcap and no glyph clash',
   const unpriced = positionScorecardText(row, { ...view, live: null, math: positionMath(row, null), pricePerToken: null, mcapLamports: null }, 180);
   assert.match(unpriced, /market price unavailable/);
 });
+
+/* --------------------- wallet vs books reconciliation --------------------- */
+
+const { holdingDivergence } = require('../dist/types');
+
+test('holdingDivergence: classifies what the wallet actually holds', () => {
+  assert.equal(holdingDivergence(100n, 100n), 'ok');
+  assert.equal(holdingDivergence(100n, 150n), 'ok');   // topped up elsewhere
+  assert.equal(holdingDivergence(100n, 60n), 'partial');
+  assert.equal(holdingDivergence(100n, 0n), 'gone');
+});
+
+test('holdingDivergence: never acts on an unreadable balance', () => {
+  assert.equal(holdingDivergence(100n, null), 'unknown'); // RPC hiccup
+  assert.equal(holdingDivergence(null, 50n), 'unknown');
+});
+
+test('holdingDivergence: nothing expected is always fine', () => {
+  assert.equal(holdingDivergence(0n, 0n), 'ok');
+  assert.equal(holdingDivergence(-5n, 0n), 'ok');
+});

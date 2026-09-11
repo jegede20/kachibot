@@ -748,11 +748,15 @@ export class KachiBot {
     const v = view ?? { live: null, math: positionMath(t, null), pricePerToken: null, mcapLamports: null, entryPricePerToken: t.entryPriceLamports ?? null };
     const text = positionScorecardText(t, v, solUsd);
     const kbRows: BtnRow[] = [];
-    kbRows.push(row(
-      B('💸 Sell 25%', `sellfrac:${t.id}:25`),
-      B('💸 Sell 50%', `sellfrac:${t.id}:50`),
-      B('💸 Sell all', `sell:${t.id}`),
-    ));
+    if (t.outOfSync) {
+      kbRows.push(row(B('🧹 Close stale entry', `closeStale:${t.id}`)));
+    } else {
+      kbRows.push(row(
+        B('💸 Sell 25%', `sellfrac:${t.id}:25`),
+        B('💸 Sell 50%', `sellfrac:${t.id}:50`),
+        B('💸 Sell all', `sell:${t.id}`),
+      ));
+    }
     kbRows.push(row(B('🔄 Refresh', `pos:${t.id}`), B('📡 Positions', 'm:positions')));
     await this.answer(ctx, text, { kb: this.kb(kbRows) });
   }
@@ -1184,6 +1188,11 @@ export class KachiBot {
       await trader.sellOpenPosition(this.uid(ctx), rest, 'MANUAL');
     });
     on('pos', async (ctx, rest) => { await this.cbText(ctx, ' '); await this.positionCard(ctx, rest); });
+    on('closeStale', async (ctx, rest) => {
+      await this.cbText(ctx, '🧹 closing stale entry…');
+      await trader.closeStalePosition(this.uid(ctx), String(rest)).catch(() => null);
+      await this.showPositions(ctx);
+    });
     on('sellfrac', async (ctx, rest) => {
       const [rowId, pctRaw] = String(rest).split(':');
       const pct = Number(pctRaw);

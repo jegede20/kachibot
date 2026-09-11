@@ -7,7 +7,7 @@
 import { Keypair, PublicKey, VersionedTransaction, TransactionInstruction, Connection } from '@solana/web3.js';
 import BN from 'bn.js';
 import { getStore, Store } from './db';
-import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit, resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing, evaluateReputation, watchReputation, type TrailingStopConfig, type BuySizeConfig, type ReputationConfig, copySellFraction, positionMath, PositionMath } from './types';
+import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit, resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing, evaluateReputation, watchReputation, type TrailingStopConfig, type BuySizeConfig, type ReputationConfig, copySellFraction, positionMath, PositionMath, holdingDivergence } from './types';
 import {
   curvePhase, fetchCurve, loadPricingCtx, sellSolLamportsForTokenAmount,
   buildCurveBuy, buildCurveSell, mcapSolLamports, priceSolPerTokenLamports,
@@ -18,7 +18,7 @@ import { getConnection } from './chain/conn';
 import { getSolUsd } from './chain/price';
 import { buildPumpSwapBuy, buildPumpSwapSell, findPumpSwapPool, poolMcapLamports } from './chain/pumpswap';
 import { simulate, sendTrade, confirmSignature, toVersioned } from './chain/send';
-import { getTokenMeta, rugFlags, describeRugFlags } from './chain/meta';
+import { getTokenMeta, rugFlags, describeRugFlags, mintSupplyRaw } from './chain/meta';
 import { decryptSecret, keypairFromSecret } from './crypto';
 import { notifyUser } from './notify';
 import { chartLink, scorecardText, coinTag, solExact } from './format';
@@ -142,6 +142,7 @@ export class Trader {
   private peaks = new Map<string, number>();
   /** throttles for the low-balance heads-up */
   private balanceCheckedAt = new Map<number, number>();
+  private reconciledAt = new Map<string, number>();
   private balanceWarnedAt = new Map<number, number>();
   /** buys waiting for their confirm-hold window to elapse */
   private pendingConfirms = new Set<string>();
@@ -888,8 +889,13 @@ export class Trader {
       const userId = doc.userId;
       try {
         const open = await this.store.listTrades(userId, 'open');
+        const wallet = getWallet(doc);
         for (const row of open) {
           if (this.sellingRows.has(row.id)) continue;
+          // a position whose tokens already left the wallet is never sellable:
+          // stop re-trying it every tick and let the user reconcile it
+          if (row.outOfSync) continue;
+          if (wallet && !(await this.reconcileRow(userId, row, wallet))) continue;
           await this.chained(userId, () => this.checkThresholds(userId, row));
         }
       } catch (e) {
@@ -898,6 +904,67 @@ export class Trader {
       // proactive refill nudge — so the next ape is not blocked at buy time
       await this.checkLowBalance(doc).catch(() => undefined);
     }
+  }
+
+  /**
+   * Does the wallet still hold what this open row claims?
+   * Tokens can leave without us (sold from another bot, moved to a cold
+   * wallet, …). Without this the bot would retry an impossible sell forever
+   * and silently never exit the position.
+   * Returns true when the row is in sync and should be checked normally.
+   */
+  private async reconcileRow(userId: number, row: TradeRow, wallet: { publicKey: PublicKey }): Promise<boolean> {
+    const everyMs = 2 * 60_000;
+    const last = this.reconciledAt.get(row.id) || 0;
+    if (Date.now() - last < everyMs) return true;
+    this.reconciledAt.set(row.id, Date.now());
+
+    const conn = getConnection();
+    const mint = new PublicKey(row.mint);
+    const expected = this.remainingTokens(row);
+    if (expected <= 0n) return true;
+    try {
+      const tp = await getTokenProgramForMint(conn, mint);
+      const ata = deriveAta(wallet.publicKey, mint, tp);
+      const info = await conn.getTokenAccountBalance(ata, 'confirmed').catch(() => null);
+      const actual = info?.value?.amount !== undefined ? BigInt(info.value.amount) : null;
+      const verdict = holdingDivergence(expected, actual);
+      if (verdict === 'ok' || verdict === 'unknown') return true;
+
+      row.outOfSync = true;
+      row.outOfSyncAt = Date.now();
+      await this.store.putTrade(row).catch(() => undefined);
+      const fmt = (n: bigint) => (Number(n) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 });
+      await notifyUser(
+        userId,
+        `🚨 <b>OUT OF SYNC</b> — $${row.symbol}: your wallet holds ${fmt(actual ?? 0n)} tokens but KACHIBOT's books still count ${fmt(expected)}.\n\n`
+        + 'They left the wallet outside the bot (sold or moved elsewhere), so automatic exits are paused for this position.\n'
+        + 'Open 📡 Positions → tap it to close the stale entry.',
+      );
+      return false;
+    } catch {
+      return true; // never let a reconcile hiccup block a real exit check
+    }
+  }
+
+  /** close a position the wallet no longer holds (user's explicit choice) */
+  async closeStalePosition(userId: number, rowId: string): Promise<TradeRow | null> {
+    return this.chained(userId, async () => {
+      const open = await this.store.listTrades(userId, 'open');
+      const row = open.find((t) => t.id === rowId);
+      if (!row || !row.outOfSync) return null;
+      const remaining = this.remainingTokens(row);
+      this.sellingRows.add(row.id);
+      try {
+        // nothing to sell on-chain: book the leftover as a manual exit at zero
+        // so the trade card stays honest about what we cannot verify
+        await this.recordSell(row, 'MANUAL', remaining, 0, null, 'closed by user — tokens had already left the wallet');
+        await this.closeRowIfDone(row);
+        return row;
+      } finally {
+        this.sellingRows.delete(row.id);
+      }
+    });
   }
 
   /**
@@ -1139,8 +1206,8 @@ export class Trader {
 
   private async mintSupply(mint: PublicKey): Promise<number | null> {
     const info = await getConnection().getAccountInfo(mint, 'confirmed');
-    if (!info || info.data.length < 44) return null;
-    return Number(BigInt(`0x${info.data.subarray(36, 44).toString('hex')}`));
+    if (!info) return null;
+    return mintSupplyRaw(info.data);
   }
 
   private vtxInstructions(tx: VersionedTransaction): TransactionInstruction[] {

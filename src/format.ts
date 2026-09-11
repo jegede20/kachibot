@@ -306,6 +306,11 @@ export function positionScorecardText(
   if (st.trailing?.enabled) guards.push('trailing');
   if (st.breakEvenStop) guards.push('break-even');
   L.push(two('guards', guards.join(' · ')));
+  if (t.outOfSync) {
+    L.push(rule);
+    L.push(`${T} ⚠️ <b>out of sync</b> — these tokens already left your wallet`);
+    L.push(`${T} (sold or moved outside the bot), so auto-exits are paused.`);
+  }
   L.push(rule);
   L.push(chartLink(t.mint));
   return L.join('\n');
