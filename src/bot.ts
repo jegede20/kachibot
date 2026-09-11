@@ -4,7 +4,7 @@
  * alerts. Text inputs run on a tiny state machine (next message = value,
  * PIN, address…).
  */
-import { Telegraf, Markup, Context } from 'telegraf';
+import { Telegraf, Markup, Context, Input } from 'telegraf';
 import { PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { getConnection } from './chain/conn';
 import { getStore } from './db';
@@ -16,8 +16,10 @@ import {
   decryptSecret, encryptSecret, generateMnemonic, keypairFromMnemonic,
   keypairFromSecret, keypairToSecret, parsePrivateKey,
 } from './crypto';
-import { solShort, sol, pctSigned, ago, durMs, scorecardText, pnlScorecardText, positionScorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
+import { solShort, sol, pctSigned, ago, durMs, scorecardText, pnlScorecardText, positionScorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel, chartLink } from './format';
 import { parsePumpfunLink, WALLET_ADDR_RE, TELEGRAM_ALLOWED_USER_IDS, PUBLIC_URL } from './config';
+import { renderScorecard } from './card/scorecard';
+import { tradeScorecardModel, overallScorecardModel, avgMcapLamports, topExitReason } from './card/model';
 import { fetchCurve, isLiveCurve } from './chain/pump';
 import { getSolUsd } from './chain/price';
 import crypto from 'node:crypto';
@@ -157,6 +159,29 @@ export class KachiBot {
       }
     }
     await ctx.reply(text, { ...HTML, reply_markup: o.kb?.reply_markup });
+  }
+
+  /**
+   * Send a scorecard image. The menu message is replaced by the card (same as
+   * the text flow), and if the image can ever be produced or uploaded we fall
+   * back to the text card so the user is never left with an empty tap.
+   */
+  private async answerCard(ctx: Context, png: Buffer, fallbackText: string, rows: BtnRow[], caption?: string): Promise<void> {
+    const kb = this.kb(rows);
+    const q = ctx.callbackQuery;
+    const msgId = q && 'message' in q && q.message ? (q.message as { message_id?: number }).message_id : undefined;
+    try {
+      if (msgId) await ctx.deleteMessage(msgId).catch(() => undefined);
+      await ctx.replyWithPhoto(Input.fromBuffer(png), {
+        caption: caption || '',
+        ...HTML,
+        reply_markup: kb.reply_markup,
+      });
+      return;
+    } catch {
+      /* fall through to text */
+    }
+    await ctx.reply(fallbackText, { ...HTML, reply_markup: kb.reply_markup });
   }
 
   /* ------------------------------- commands ------------------------------ */
@@ -773,9 +798,26 @@ export class KachiBot {
     }
     const solUsd = await getSolUsd().catch(() => null);
     const st = scorecardStats(all, { unrealizedByRow });
-    await this.answer(ctx, pnlScorecardText(st, solUsd), {
-      kb: this.kb([[B('📖 History', 'm:history'), B('📡 Positions', 'm:positions')], [B('🔙 Main', 'm:main')]]),
-    });
+    const kbRows: BtnRow[] = [[B('📖 History', 'm:history'), B('📡 Positions', 'm:positions')], [B('🔙 Main', 'm:main')]];
+    const text = pnlScorecardText(st, solUsd);
+    const closed = all.filter((t) => t.status === 'closed');
+    if (!closed.length && !st.openCount) {
+      // nothing to plot yet — the text card explains the empty state better
+      await this.answer(ctx, text, { kb: this.kb(kbRows) });
+      return;
+    }
+    try {
+      const model = overallScorecardModel({
+        stats: st,
+        solUsd,
+        avgEntryMcapLamports: avgMcapLamports(closed, (t) => t.entryMcapLamports),
+        avgExitMcapLamports: avgMcapLamports(closed, (t) => t.exitMcapLamports ?? null),
+        topReason: topExitReason(closed),
+      });
+      await this.answerCard(ctx, await renderScorecard(model), text, kbRows);
+    } catch {
+      await this.answer(ctx, text, { kb: this.kb(kbRows) });
+    }
   }
 
   /* -------------------------------- history ------------------------------- */
@@ -1209,7 +1251,15 @@ export class KachiBot {
       const seq = Math.max(1, closed.findIndex((x) => x.id === rest) + 1);
       const solUsd = await getSolUsd().catch(() => null);
       await this.cbText(ctx, ' ');
-      await this.answer(ctx, scorecardText(t, seq, running, solUsd), { kb: this.kb([[B('📖 History', 'm:history')]]) });
+      const kbRows: BtnRow[] = [[B('📖 History', 'm:history')]];
+      const text = scorecardText(t, seq, running, solUsd);
+      try {
+        const exitMcap = await trader.mcapAtExitLamports(t).catch(() => null);
+        const model = tradeScorecardModel({ trade: t, exitMcapLamports: exitMcap, solUsd });
+        await this.answerCard(ctx, await renderScorecard(model), text, kbRows, `📈 <a href="${chartLink(t.mint)}">chart</a>`);
+      } catch {
+        await this.answer(ctx, text, { kb: this.kb(kbRows) });
+      }
     });
     on('m:pnl', async (ctx) => { await this.cbText(ctx, ' '); await this.showPnl(ctx); });
     on('hist', async (ctx, rest) => { await this.cbText(ctx, ' '); await this.showHistory(ctx, Number(rest) || 0); });

@@ -430,6 +430,8 @@ export interface TradeRow {
   entryTokenAmount: string;        // raw token units received
   entryPriceLamports: number;      // SOL lamports per raw token at entry
   entryMcapLamports: number | null;
+  /** market cap in SOL lamports when the position closed (null when unknown) */
+  exitMcapLamports?: number | null;
   walletBalanceBefore: number | null;
   /** highest multiple seen while open (drives the trailing stop) */
   peakMultiple: number | null;

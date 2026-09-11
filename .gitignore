@@ -14,7 +14,9 @@ uploads/
 .npm/
 *.tar.gz
 kachibot-*.png
-assets/fonts/*.ttf
 
 # stray system marker
 .sudo_as_admin_successful
+
+# generated previews
+out/

@@ -12,6 +12,7 @@ import { getStore } from './db';
 import { trader } from './trader';
 import { watcher } from './watcher';
 import { startBot } from './bot';
+import { renderSampleCard, type SampleKind } from './card/sample';
 
 async function main(): Promise<void> {
   assertConfig();
@@ -46,6 +47,20 @@ async function main(): Promise<void> {
       if (guide === null) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('guide file not found'); return; }
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
       res.end(guide);
+      return;
+    }
+    if (url === '/card') {
+      const qs = new URL(req.url || '/', 'http://card').searchParams;
+      const kind: SampleKind = qs.get('bear') ? 'bear' : qs.get('overall') ? 'overall' : 'bull';
+      void renderSampleCard(kind)
+        .then((png) => {
+          res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+          res.end(png);
+        })
+        .catch((e: Error) => {
+          res.writeHead(500, { 'content-type': 'text/plain' });
+          res.end(`card render failed: ${e.message}`);
+        });
       return;
     }
     if (url === '/status') {

@@ -784,6 +784,15 @@ export class Trader {
     return proceeds;
   }
 
+  /** market cap in SOL lamports at exit; derives it for rows closed before we stored it */
+  async mcapAtExitLamports(row: TradeRow): Promise<number | null> {
+    if (typeof row.exitMcapLamports === 'number' && row.exitMcapLamports > 0) return row.exitMcapLamports;
+    const px = row.exitPriceLamports ?? 0;
+    if (!(px > 0)) return null;
+    const supply = await this.mintSupply(new PublicKey(row.mint)).catch(() => null);
+    return supply !== null ? Math.floor(px * supply) : null;
+  }
+
   /** append a sell record; row passed by reference is mutated */
   private async recordSell(
     row: TradeRow,
@@ -828,6 +837,13 @@ export class Trader {
     row.pnlPct = row.spentLamports > 0 ? (realized - row.spentLamports) / row.spentLamports : null;
     row.netMultiple = row.spentLamports > 0 ? realized / row.spentLamports : null;
     row.holdMs = row.exitTime - row.entryTime;
+
+    // exit market cap: price per token at exit x supply (same maths as entry)
+    {
+      const px = row.exitPriceLamports ?? 0;
+      const supply = await this.mintSupply(new PublicKey(row.mint)).catch(() => null);
+      row.exitMcapLamports = supply !== null && px > 0 ? Math.floor(px * supply) : null;
+    }
 
     const doc = await store.getUser(row.userId);
     const wallet = getWallet(doc);
