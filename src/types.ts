@@ -510,6 +510,8 @@ export interface PnlStats {
   unrealizedLamports: number | null;
   last7: { closed: number; realizedLamports: number };
   firstTradeAt: number | null;
+  /** snipes that never filled (failed) — shown so the card is honest early on */
+  failed: number;
 }
 
 /**
@@ -614,6 +616,7 @@ export function scorecardStats(
     unrealizedLamports: unrealized,
     last7: { closed: last7Rows.length, realizedLamports: last7Rows.reduce((a, r) => a + pnlOf(r), 0) },
     firstTradeAt: rows.length ? Math.min(...rows.map((r) => r.entryTime)) : null,
+    failed: rows.filter((r) => r.status === 'failed').length,
   };
 }
 

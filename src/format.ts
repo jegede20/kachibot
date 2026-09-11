@@ -160,6 +160,11 @@ export function pnlScorecardText(st: PnlStats, solUsd: number | null = null): st
     L.push(rule);
     L.push(`${T} no closed copies yet — the card fills itself`);
     L.push(`${T} the moment your first ape exits.`);
+    if (st.failed) {
+      L.push(rule);
+      L.push(`${T} ${st.failed} snipe${st.failed === 1 ? '' : 's'} didn't fill — no SOL spent,`);
+      L.push(`${T} nothing lost. Failed attempts never open a position.`);
+    }
     L.push(rule);
     L.push(`${T} tip: 👀 Watchlist → add a wallet you trust.`);
     return L.join('\n');
