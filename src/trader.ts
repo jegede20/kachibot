@@ -926,8 +926,12 @@ export class Trader {
     try {
       const tp = await getTokenProgramForMint(conn, mint);
       const ata = deriveAta(wallet.publicKey, mint, tp);
-      const info = await conn.getTokenAccountBalance(ata, 'confirmed').catch(() => null);
-      const actual = info?.value?.amount !== undefined ? BigInt(info.value.amount) : null;
+      // A missing token account means a definite zero (the ATA is closed when
+      // a bag is fully sold) — that is very different from an RPC hiccup.
+      const acct = await conn.getAccountInfo(ata, 'confirmed'); // throws only on RPC failure
+      let actual: bigint | null = null;
+      if (acct === null) actual = 0n;
+      else if (acct.data.length >= 72) actual = acct.data.readBigUInt64LE(64); // RawAccount.amount (SPL + Token-2022 share this layout)
       const verdict = holdingDivergence(expected, actual);
       if (verdict === 'ok' || verdict === 'unknown') return true;
 
