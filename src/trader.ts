@@ -4,15 +4,10 @@
  * trades. Enforces every cap & check before funds move and never drops a
  * trade silently: failures end in a 'failed' trade row + notification.
  */
-import { Keypair, PublicKey, VersionedTransaction, TransactionInstruction } from '@solana/web3.js';
+import { Keypair, PublicKey, VersionedTransaction, TransactionInstruction, Connection } from '@solana/web3.js';
 import BN from 'bn.js';
 import { getStore, Store } from './db';
-import {
-  UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit,
-  resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing,
-  evaluateReputation, watchReputation,
-  type TrailingStopConfig, type BuySizeConfig, type ReputationConfig,
-} from './types';
+import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit, resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing, evaluateReputation, watchReputation, type TrailingStopConfig, type BuySizeConfig, type ReputationConfig, copySellFraction } from './types';
 import {
   curvePhase, fetchCurve, loadPricingCtx, sellSolLamportsForTokenAmount,
   buildCurveBuy, buildCurveSell, mcapSolLamports, priceSolPerTokenLamports,
@@ -43,6 +38,8 @@ export interface WatchSignal {
   /** exact SOL that left the watched wallet in this tx */
   spentSolLamports?: number | null;
   tokenAmountRaw: string | null;
+  /** 0..1 share of the watched wallet's OWN bag this sell moved (null if unknown) */
+  apeSoldFraction?: number | null;
   sig: string;
   route: string;
 }
@@ -340,7 +337,11 @@ export class Trader {
     const exit = resolveExit(doc, watch);
     const soldTxt = solExact(ev.spendLamports);
     const what = coinTag(ev.mintName, ev.mintSymbol, ev.mint);
-    const frac = exitSellFraction(exit);
+    const ruleFrac = exitSellFraction(exit);
+    // mirror: sell the same slice of OUR bag that the ape sold of theirs, so a
+    // partial profit-take leaves us a moonbag too (TP/SL still guard the rest).
+    const frac = copySellFraction(doc.settings.copySellMode, ev.apeSoldFraction, ruleFrac);
+    const mirrored = doc.settings.copySellMode === 'mirror' && typeof ev.apeSoldFraction === 'number' && ev.apeSoldFraction > 0;
 
     // hold / mult / mcap: the ape selling is NOT an exit signal for us
     if (frac <= 0) {
@@ -355,9 +356,12 @@ export class Trader {
 
     if (doc.settings.alerts.activity) {
       const size = frac >= 0.999 ? 'all' : `${Math.round(frac * 100)}%`;
+      const how = mirrored
+        ? `they sold ${Math.round((ev.apeSoldFraction as number) * 100)}% of their bag — selling ${size} of yours and keeping the rest as a moonbag`
+        : `selling ${size}`;
       await notifyUser(
         doc.userId,
-        `👻 <b>COPY-SELL TRIGGERED</b> — ${escTag(ev.watchedLabel)} dumped ${what}${soldTxt ? ` (≈ ${soldTxt})` : ''}. Selling ${size} of ${matches.length} open position${matches.length > 1 ? 's' : ''}.`,
+        `👻 <b>COPY-SELL TRIGGERED</b> — ${escTag(ev.watchedLabel)} dumped ${what}${soldTxt ? ` (≈ ${soldTxt})` : ''}. ${how} on ${matches.length} open position${matches.length > 1 ? 's' : ''}.`,
       );
     }
     for (const t of matches) {
@@ -445,6 +449,7 @@ export class Trader {
         tpMultiples: [...s.tpMultiples],
         stopLossPct: s.stopLossPct,
         copySell: s.copySell,
+        copySellMode: s.copySellMode,
         slippagePct: s.slippagePct,
         maxFeeLamports: s.maxFeeLamports,
       },
@@ -461,6 +466,45 @@ export class Trader {
       error: null,
       txSignatures: [],
     };
+  }
+
+  /**
+   * Plan a post-graduation buy across every venue we can reach:
+   * Jupiter first (best aggregated price), then the PumpSwap pool directly.
+   * Retries a couple of times because a freshly graduated coin can spend a few
+   * seconds with no indexed route and no live pool.
+   */
+  private async planGraduatedBuy(
+    conn: Connection,
+    opts: { mint: PublicKey; buyer: PublicKey; budgetLamports: number; slippagePct: number },
+  ): Promise<
+    { kind: 'jupiter'; plan: Awaited<ReturnType<typeof buildJupiterBuy>>['plan']; tx: VersionedTransaction } |
+    { kind: 'pumpswap'; plan: Awaited<ReturnType<typeof buildPumpSwapBuy>> }
+  > {
+    const ATTEMPTS = 3;
+    let lastErr = 'no route found for this token';
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      try {
+        const j = await buildJupiterBuy(conn, opts);
+        return { kind: 'jupiter', plan: j.plan, tx: j.tx };
+      } catch (e) {
+        const m = (e as Error).message;
+        if (!noRouteError(m)) throw e; // real failure (bad params, …) — do not retry
+        lastErr = m;
+      }
+      try {
+        const ps = await buildPumpSwapBuy(conn, opts);
+        return { kind: 'pumpswap', plan: ps };
+      } catch (e) {
+        lastErr = (e as Error).message;
+        if (attempt < ATTEMPTS) await new Promise((r) => setTimeout(r, 4000));
+      }
+    }
+    throw new Error(
+      /migrat|no PumpSwap pool/i.test(lastErr)
+        ? 'coin just graduated and its liquidity is still migrating — no tradeable pool yet (~12s of retries)'
+        : lastErr,
+    );
   }
 
   private async executeBuy(doc: UserDoc, ev: WatchSignal, budget: number, route: 'curve' | 'jupiter'): Promise<void> {
@@ -494,18 +538,17 @@ export class Trader {
         row.txSignatures.push(res.signature);
         if (res.outcome === 'landed-failed') throw new Error('tx landed but failed on-chain');
       } else {
-        let j: Awaited<ReturnType<typeof buildJupiterBuy>> | null = null;
-        let ps: Awaited<ReturnType<typeof buildPumpSwapBuy>> | null = null;
-        try {
-          j = await buildJupiterBuy(conn, { mint, buyer: wallet.publicKey, budgetLamports: budget, slippagePct: doc.settings.slippagePct });
-        } catch (e) {
-          const m = (e as Error).message;
-          // Jupiter often has no route for a coin that JUST graduated — its
-          // liquidity is on PumpSwap. Swap against that pool directly instead
-          // of letting the copy fail.
-          if (!noRouteError(m)) throw e;
-          ps = await buildPumpSwapBuy(conn, { mint, buyer: wallet.publicKey, budgetLamports: budget, slippagePct: doc.settings.slippagePct });
-        }
+        // A coin that JUST graduated can sit in a window where Jupiter has not
+        // indexed it and the PumpSwap pool is not live yet. Retry briefly
+        // across both venues instead of losing the copy.
+        const leg = await this.planGraduatedBuy(conn, {
+          mint,
+          buyer: wallet.publicKey,
+          budgetLamports: budget,
+          slippagePct: doc.settings.slippagePct,
+        });
+        const j = leg.kind === 'jupiter' ? leg : null;
+        const ps = leg.kind === 'pumpswap' ? leg.plan : null;
         const supply = await this.mintSupply(mint);
 
         if (j) {

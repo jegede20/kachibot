@@ -46,3 +46,46 @@ test('poolMcapLamports: handles BN-string reserves from a plan', () => {
   const st = { poolBaseAmount: new BN('2000000000'), poolQuoteAmount: new BN(BigInt(4) * 1_000_000_000n) };
   assert.equal(poolMcapLamports(st, 500_000_000), 1_000_000_000);
 });
+
+/* ------------------------- copy-sell: mirror mode ------------------------- */
+
+const { soldFractionOf, copySellFraction, normalizeCopySellMode } = require('../dist/types');
+
+test('soldFractionOf: measures the slice of the ape bag a sell moved', () => {
+  assert.equal(soldFractionOf(1000n, 400n), 0.6);   // sold 60%, kept 40% moonbag
+  assert.equal(soldFractionOf(1000n, 0n), 1);       // full exit
+  assert.equal(soldFractionOf('1000', '250'), 0.75); // string balances
+  assert.equal(soldFractionOf(1000n, 999n), 0.001); // tiny trim
+});
+
+test('soldFractionOf: null when the tx tells us nothing', () => {
+  assert.equal(soldFractionOf(1000n, 1000n), null); // no change
+  assert.equal(soldFractionOf(0n, 0n), null);       // no pre balance
+  assert.equal(soldFractionOf(null, 5n), null);
+  assert.equal(soldFractionOf(undefined, undefined), null);
+});
+
+test('copySellFraction: mirror copies the ape slice, all dumps everything', () => {
+  assert.equal(copySellFraction('mirror', 0.6, 1), 0.6);
+  assert.equal(copySellFraction('mirror', 1, 1), 1);
+  assert.equal(copySellFraction('all', 0.25, 1), 1);      // dump all regardless
+  assert.equal(copySellFraction('all', 0.25, 0.5), 1);
+});
+
+test('copySellFraction: falls back to the exit rule when the ape slice is unknown', () => {
+  assert.equal(copySellFraction('mirror', null, 0.5), 0.5);
+  assert.equal(copySellFraction('mirror', undefined, 0.5), 0.5);
+  assert.equal(copySellFraction(undefined, 0.6, 0.5), 0.5); // legacy doc
+});
+
+test('copySellFraction: clamps absurd values', () => {
+  assert.equal(copySellFraction('mirror', 0.0001, 1), 0.01); // never sell ~0
+  assert.equal(copySellFraction('mirror', 5, 1), 1);         // never oversell
+});
+
+test('normalizeCopySellMode: backfills safely', () => {
+  assert.equal(normalizeCopySellMode(undefined), 'mirror');
+  assert.equal(normalizeCopySellMode('all'), 'all');
+  assert.equal(normalizeCopySellMode('mirror'), 'mirror');
+  assert.equal(normalizeCopySellMode('nonsense'), 'mirror');
+});

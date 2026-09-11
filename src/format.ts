@@ -160,7 +160,7 @@ export function openPositionText(t: TradeRow, liveValueLamports: number | null, 
   }
   const tpText = t.settingsAtEntry.tpMultiples.map((m) => `${m}x`).join(',');
   const sl = (1 - t.settingsAtEntry.stopLossPct);
-  lines.push(`${T} exits     TP ${tpText} · SL ${(sl * 100).toFixed(0)}%${t.settingsAtEntry.copySell ? ' · copy-sell on' : ''}`);
+  lines.push(`${T} exits     TP ${tpText} · SL ${(sl * 100).toFixed(0)}%${t.settingsAtEntry.copySell ? ` · copy-sell ${t.settingsAtEntry.copySellMode === 'all' ? 'all' : 'mirror'}` : ''}`);
   lines.push(`chart: pump.fun/coin/${t.mint}`);
   return lines.join('\n');
 }

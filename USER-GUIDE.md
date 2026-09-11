@@ -87,6 +87,7 @@ Tap a row to type a new value; tap a toggle to switch it.
 | 🎯 TP ladder (e.g. `2x,3x,5x`) | 2x, 3x |
 | 🛑 Stop-loss % | -50% |
 | 👻 Copy-sell (mirror the ape's sells) | OFF |
+| 🪞 On their sell → MIRROR their % / dump ALL | mirror |
 | 💸 Exit rule | follow ape — sell all |
 
 ---
@@ -140,6 +141,15 @@ Anything marked **(default)** inherits your global setting. Per-wallet rules app
 | 📈 **Sell at mcap** | Nothing | Sells all at your market cap (e.g. 100k) |
 
 Set a default in ⚙️ Settings, or per wallet from its card. 🎯/📈 replace the TP ladder for that position; stop-loss, trailing and rug protection always still apply. 🙌 Hold and targets don't need copy-sell ON.
+
+**Copying a partial sell (moonbags).** Turn copy-sell ON and pick the mode under it:
+
+| Mode | What the bot does when the ape sells |
+|---|---|
+| 🪞 **Mirror** (default) | Sells the *same % of your bag* they sold of theirs. Sell 60% → you sell 60% and keep a 40% moonbag. They take profit again → you mirror again. |
+| 📤 **Dump all** | Sells 100% on their first sell, whatever size theirs was. |
+
+While a moonbag is open, stop-loss, trailing, break-even, max hold and the TP ladder still guard it, and 💸 Sell now on the position card always dumps the rest.
 
 ---
 

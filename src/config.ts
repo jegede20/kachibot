@@ -92,6 +92,8 @@ export const DEFAULT_SETTINGS = {
   tpMultiples: [2, 3], // exit each 50% of position at 2x and 3x
   stopLossPct: 0.5, // sell everything at -50%
   copySell: false,
+  /** 'mirror' = sell the same % the ape sold (keep a moonbag); 'all' = dump everything on their first sell */
+  copySellMode: 'mirror' as 'mirror' | 'all',
   exit: { mode: 'follow' as const, pct: 1, mult: null, mcapUsd: null },
   /** trailing stop: off by default; the user arms it from the settings menu */
   trailing: { enabled: false, armAtMult: 3, trailPct: 0.25 },

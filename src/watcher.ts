@@ -15,7 +15,7 @@ import {
   TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID,
 } from './chain/pump';
 import { trader, type WatchSignal } from './trader';
-import { UserDoc, WatchedWallet } from './types';
+import { UserDoc, WatchedWallet, soldFractionOf } from './types';
 import { notifyUser } from './notify';
 import { decodeMessageView, allIxs, detectSwapSignals, determineSide, PRIME_STALE_MS, isStaleTx } from './chain/txview';
 import BN from 'bn.js';
@@ -328,11 +328,16 @@ class Watcher {
     const preTok = ((tx.meta as unknown as { preTokenBalances?: Array<{ accountIndex: number; owner: string | null; mint: string; uiTokenAmount?: { amount: string } }> })?.preTokenBalances) || [];
     const postTok = ((tx.meta as unknown as { postTokenBalances?: Array<{ accountIndex: number; owner: string | null; mint: string; uiTokenAmount?: { amount: string } }> })?.postTokenBalances) || [];
     const deltaByOwner = new Map<string, Map<string, bigint>>(); // owner -> mint -> delta
+    // owner -> mint -> balance before/after: lets us measure WHAT FRACTION of
+    // the watched wallet's bag a sell actually was (60% sold = 60% copied).
+    const balByOwner = new Map<string, Map<string, { pre: bigint; post: bigint }>>();
     for (const b of postTok) {
       if (!b.owner || !b.mint) continue;
       const pre = preTok.find((p) => p.accountIndex === b.accountIndex);
       const cur = BigInt(b.uiTokenAmount?.amount ?? '0');
       const prev = pre ? BigInt(pre.uiTokenAmount?.amount ?? '0') : 0n;
+      if (!balByOwner.has(b.owner)) balByOwner.set(b.owner, new Map());
+      balByOwner.get(b.owner)!.set(b.mint, { pre: prev, post: cur });
       const d = cur - prev;
       if (d === 0n) continue;
       if (!deltaByOwner.has(b.owner)) deltaByOwner.set(b.owner, new Map());
@@ -490,6 +495,11 @@ class Watcher {
         }
 
         const metaEv = metaByMint.get(ev.mint);
+        // did the ape dump everything, or take profit and keep a moonbag?
+        const apeBal = ev.side === 'sell' ? balByOwner.get(address)?.get(ev.mint) : undefined;
+        const apeSoldFraction = apeBal
+          ? soldFractionOf(apeBal.pre.toString(), apeBal.post.toString())
+          : null;
         const signal: WatchSignal = {
           userId: sub.userId,
           watchId: sub.watch.id,
@@ -502,6 +512,7 @@ class Watcher {
           spendLamports: spend,
           spentSolLamports: spentExact,
           tokenAmountRaw: ev.tokenDeltaRaw !== null ? ev.tokenDeltaRaw.toString() : null,
+          apeSoldFraction,
           sig: signature,
           route: `pump:${ev.name}`,
         };

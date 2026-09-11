@@ -70,7 +70,7 @@ function settingsSummary(s: UserDoc['settings']): string {
     `⚠️ low-balance alert: <b>${s.lowBalanceWarnLamports > 0 ? `below ${sol(s.lowBalanceWarnLamports)}` : 'off'}</b>`,
     `👤 reputation: <b>${repCfg.enabled ? `${repCfg.onFail === 'skip' ? 'skip' : 'halve'} apes under ${Math.round(repCfg.minWinRate * 100)}% win (after ${repCfg.minTrades} copies)` : 'off'}</b>`,
     `🛑 stop-loss: <b>-${Math.round(s.stopLossPct * 100)}%</b>`,
-    `👻 copy-sell: <b>${s.copySell ? 'ON' : 'off'}</b>`,
+    `👻 copy-sell: <b>${s.copySell ? (s.copySellMode === 'all' ? 'ON — sell ALL when they sell' : 'ON — mirror their sell %') : 'off'}</b>`,
     `💸 exit rule: <b>${describeExit(normalizeExit(s.exit))}</b>`,
     `📏 spend window: <b>${sol(s.minSpendLamports)}–${sol(s.maxSpendLamports)}</b>`,
     `🪫 caps: <b>${sol(s.perTradeCapLamports)}/trade · ${sol(s.dailyCapLamports)}/day</b>`,
@@ -246,6 +246,14 @@ export class KachiBot {
       B(`👻 copy-sell ${s.copySell ? '✅' : '⬜'}`, 's:copySell'),
       B(`🛡 honeypot ${s.honeypotCheck ? '✅' : '⬜'}`, 's:honeypot'),
     ));
+    if (s.copySell) {
+      kbRows.push(row(B(
+        s.copySellMode === 'all'
+          ? '📤 on their sell → dump ALL — tap to MIRROR their %'
+          : '🪞 on their sell → MIRROR their % — tap to dump ALL',
+        's:copySellMode',
+      )));
+    }
     kbRows.push(row(
       B(`🎏 trailing ${s.trailing?.enabled ? '✅' : '⬜'}`, 's:trailing'),
       B(`🎗 break-even ${s.breakEvenStop ? '✅' : '⬜'}`, 's:breakeven'),
@@ -746,7 +754,7 @@ export class KachiBot {
       `spent ${solShort(t.spentLamports)} · ${ago(t.entryTime)}`,
       `live ${value !== null ? `${solShort(value)}${mult !== null ? ` (${mult.toFixed(2)}x)` : ''}` : '…'}`,
       t.entryMcapLamports ? `entry mcap ◎${(t.entryMcapLamports / 1e9).toFixed(4)}` : '',
-      `TP ${t.settingsAtEntry.tpMultiples.join('/')}x · SL -${Math.round(t.settingsAtEntry.stopLossPct * 100)}% · copy-sell ${t.settingsAtEntry.copySell ? 'on' : 'off'}`,
+      `TP ${t.settingsAtEntry.tpMultiples.join('/')}x · SL -${Math.round(t.settingsAtEntry.stopLossPct * 100)}% · copy-sell ${t.settingsAtEntry.copySell ? (t.settingsAtEntry.copySellMode === 'all' ? 'all' : 'mirror') : 'off'}`,
       `https://pump.fun/coin/${t.mint}`,
     ].filter(Boolean).join('\n');
     await this.answer(ctx, text, { kb: this.kb([[B('💸 Sell now', `sell:${t.id}`)], [B('📡 Positions', 'm:positions')]]) });
@@ -848,8 +856,18 @@ export class KachiBot {
     on('s:copySell', async (ctx) => {
       const doc = await this.docFor(this.uid(ctx));
       doc.settings.copySell = !doc.settings.copySell;
+      if (typeof doc.settings.copySellMode !== 'string') doc.settings.copySellMode = 'mirror';
       await this.saveDoc(doc);
       await this.cbText(ctx, `copy-sell ${doc.settings.copySell ? 'ON' : 'OFF'}`);
+      await this.showSettings(ctx);
+    });
+    on('s:copySellMode', async (ctx) => {
+      const doc = await this.docFor(this.uid(ctx));
+      doc.settings.copySellMode = doc.settings.copySellMode === 'all' ? 'mirror' : 'all';
+      await this.saveDoc(doc);
+      await this.cbText(ctx, doc.settings.copySellMode === 'all'
+        ? 'copy-sell → dump ALL as soon as they sell'
+        : 'copy-sell → MIRROR: sell the same % they sold, keep the moonbag');
       await this.showSettings(ctx);
     });
     on('s:honeypot', async (ctx) => {

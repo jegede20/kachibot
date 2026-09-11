@@ -206,6 +206,53 @@ export function breakEvenArmed(partialSells: Array<{ reason?: string | null }> |
   return (partialSells || []).some((s) => s && s.reason === 'TP');
 }
 
+export type CopySellMode = 'mirror' | 'all';
+
+/** backfill for docs created before the copy-sell mode existed */
+export function normalizeCopySellMode(v: unknown): CopySellMode {
+  return v === 'all' ? 'all' : 'mirror';
+}
+
+/**
+ * How much of the watched wallet's bag they just dumped: 0..1, or null when
+ * the tx does not tell us (no balance change recorded, or a buy).
+ * Derived from the wallet's token balance before vs after the sell tx.
+ */
+export function soldFractionOf(
+  preRaw: bigint | number | string | null | undefined,
+  postRaw: bigint | number | string | null | undefined,
+): number | null {
+  const toNum = (v: bigint | number | string | null | undefined): number | null => {
+    if (v === null || v === undefined) return null;
+    const n = typeof v === 'bigint' ? Number(v) : Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const pre = toNum(preRaw);
+  const post = toNum(postRaw);
+  if (pre === null || post === null || pre <= 0 || post < 0) return null;
+  const sold = pre - post;
+  if (sold <= 0) return null;
+  return Math.min(1, sold / pre);
+}
+
+/**
+ * Fraction of OUR position to sell when the watched wallet sells.
+ *  - 'all'    -> 100% regardless of what the ape did
+ *  - 'mirror' -> the same % the ape sold of their bag
+ *  - unknown ape % (or no mirror) -> fall back to the exit rule's fraction
+ */
+export function copySellFraction(
+  mode: CopySellMode | null | undefined,
+  apeFraction: number | null | undefined,
+  ruleFraction: number,
+): number {
+  if (mode === 'all') return 1;
+  if (mode === 'mirror' && typeof apeFraction === 'number' && Number.isFinite(apeFraction) && apeFraction > 0) {
+    return Math.min(1, Math.max(0.01, apeFraction));
+  }
+  return ruleFraction;
+}
+
 /**
  * Backfill settings that did not exist when an account was created, so new
  * features work for long-standing users without a database migration.
@@ -218,6 +265,7 @@ export function ensureSettings(s: UserSettings): UserSettings {
   if (s.maxHoldMs === undefined) s.maxHoldMs = DEFAULT_SETTINGS.maxHoldMs;
   if (typeof s.lowBalanceWarnLamports !== 'number') s.lowBalanceWarnLamports = DEFAULT_SETTINGS.lowBalanceWarnLamports;
   if (!s.exit) s.exit = { ...EXIT_DEFAULT };
+  if (s.copySellMode !== 'all') s.copySellMode = normalizeCopySellMode(s.copySellMode);
   if (!s.reputation) s.reputation = { ...DEFAULT_SETTINGS.reputation };
   return s;
 }
@@ -267,6 +315,12 @@ export interface UserSettings {
   stopLossPct: number;
   /** copy the watched wallet's sells too */
   copySell: boolean;
+  /**
+   * how much of our bag to sell when the watched wallet sells:
+   * 'mirror' = the same % they sold (keeps a moonbag like they do),
+   * 'all'    = dump the whole position on their first sell.
+   */
+  copySellMode: CopySellMode;
   /** global default exit rule; a watched wallet can override it */
   exit: ExitConfig;
   /** trailing stop: bank runners by trailing the peak once armed */
@@ -383,6 +437,8 @@ export interface TradeRow {
     tpMultiples: number[];
     stopLossPct: number;
     copySell: boolean;
+    /** copy-sell behaviour snapshot for display (mirror | all) */
+    copySellMode?: CopySellMode;
     slippagePct: number;
     maxFeeLamports: number;
     /** exit rule snapshot at entry (per-watch override resolved) */
