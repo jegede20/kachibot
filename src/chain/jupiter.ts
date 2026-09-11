@@ -35,9 +35,19 @@ export interface JupiterQuote {
   otherAmountThreshold: string;
   swapMode: 'ExactIn' | 'ExactOut';
   slippageBps: number;
-  priceImpactPct: number;
+  /** v1 returns this as a decimal string */
+  priceImpactPct: number | string;
   routePlan: Array<{ swapInfo: { ammKey: string; label?: string; feePct?: number } }>;
   computedAmount?: string;
+}
+
+/**
+ * True when a Jupiter failure means "this venue can't serve the swap right now"
+ * (no route / API down / rate limited) — i.e. a fallback route is worth trying,
+ * as opposed to a bad parameter or an on-chain failure.
+ */
+export function noRouteError(msg: string): boolean {
+  return /no route|no liquidity|request failed|HTTP|timeout|aborted/i.test(msg);
 }
 
 /** Quote swapping `amountRaw` of fromMint into toMint. */
@@ -52,12 +62,12 @@ export async function quote(
     inputMint: fromMint.toBase58(),
     outputMint: toMint.toBase58(),
     amount: amountRaw.toString(),
-    slippageBps: String(Math.max(10, Math.min(2000, Math.round(slippageBps)))),
+    slippageBps: String(Math.max(10, Math.min(5000, Math.round(slippageBps)))),
     swapMode,
     restrictIntermediateTokens: 'true',
   });
   try {
-    return await jupiterFetch<JupiterQuote>(`/v6/quote?${params}`);
+    return await jupiterFetch<JupiterQuote>(`/quote?${params}`);
   } catch (e) {
     console.warn('[jupiter] quote failed:', (e as Error).message);
     return null;
@@ -79,7 +89,7 @@ async function requestSwapTx(user: PublicKey, quoteResponse: JupiterQuote): Prom
     dynamicComputeUnitLimit: true,
     prioritizationFeeLamports: { autoMultiplier: 1 },
   };
-  const res = await jupiterFetch<SwapTxResponse>('/v6/swap', {
+  const res = await jupiterFetch<SwapTxResponse>('/swap', {
     method: 'POST',
     body: JSON.stringify(body),
   });

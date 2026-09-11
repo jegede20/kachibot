@@ -18,9 +18,10 @@ import {
   buildCurveBuy, buildCurveSell, mcapSolLamports, priceSolPerTokenLamports,
   isLiveCurve, getTokenProgramForMint, deriveAta, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, WRAPPED_SOL,
 } from './chain/pump';
-import { buildJupiterBuy, buildJupiterSell, quote } from './chain/jupiter';
+import { buildJupiterBuy, buildJupiterSell, quote, noRouteError } from './chain/jupiter';
 import { getConnection } from './chain/conn';
 import { getSolUsd } from './chain/price';
+import { buildPumpSwapBuy, buildPumpSwapSell, findPumpSwapPool, poolMcapLamports } from './chain/pumpswap';
 import { simulate, sendTrade, confirmSignature, toVersioned } from './chain/send';
 import { getTokenMeta, rugFlags, describeRugFlags } from './chain/meta';
 import { decryptSecret, keypairFromSecret } from './crypto';
@@ -493,17 +494,43 @@ export class Trader {
         row.txSignatures.push(res.signature);
         if (res.outcome === 'landed-failed') throw new Error('tx landed but failed on-chain');
       } else {
-        const j = await buildJupiterBuy(conn, { mint, buyer: wallet.publicKey, budgetLamports: budget, slippagePct: doc.settings.slippagePct });
-        const supply = await this.mintSupply(mint);
-        row.entryMcapLamports = supply !== null && j.plan.tokenAmountRaw > 0n
-          ? Math.floor((Number(j.plan.solLamports) * supply) / Number(j.plan.tokenAmountRaw))
-          : null;
-        if (doc.settings.honeypotCheck) {
-          const okSim = await this.simulateVersioned(j.tx);
-          if (!okSim) throw new DodgedError('jupiter swap simulation failed — no safe route');
+        let j: Awaited<ReturnType<typeof buildJupiterBuy>> | null = null;
+        let ps: Awaited<ReturnType<typeof buildPumpSwapBuy>> | null = null;
+        try {
+          j = await buildJupiterBuy(conn, { mint, buyer: wallet.publicKey, budgetLamports: budget, slippagePct: doc.settings.slippagePct });
+        } catch (e) {
+          const m = (e as Error).message;
+          // Jupiter often has no route for a coin that JUST graduated — its
+          // liquidity is on PumpSwap. Swap against that pool directly instead
+          // of letting the copy fail.
+          if (!noRouteError(m)) throw e;
+          ps = await buildPumpSwapBuy(conn, { mint, buyer: wallet.publicKey, budgetLamports: budget, slippagePct: doc.settings.slippagePct });
         }
-        const sig = await this.sendJupiterTx(wallet, j.tx);
-        row.txSignatures.push(sig);
+        const supply = await this.mintSupply(mint);
+
+        if (j) {
+          row.entryMcapLamports = supply !== null && j.plan.tokenAmountRaw > 0n
+            ? Math.floor((Number(j.plan.solLamports) * supply) / Number(j.plan.tokenAmountRaw))
+            : null;
+          if (doc.settings.honeypotCheck) {
+            const okSim = await this.simulateVersioned(j.tx);
+            if (!okSim) throw new DodgedError('jupiter swap simulation failed — no safe route');
+          }
+          const sig = await this.sendJupiterTx(wallet, j.tx);
+          row.txSignatures.push(sig);
+        } else if (ps) {
+          row.entryMcapLamports = poolMcapLamports(
+            { poolBaseAmount: new BN(ps.poolBase), poolQuoteAmount: new BN(ps.poolQuote) },
+            supply,
+          );
+          if (doc.settings.honeypotCheck) {
+            const sim = await simulate(conn, wallet, ps.ixs);
+            if (!sim.ok) throw new DodgedError(`pre-buy simulation failed (${sim.err}) — token is not buyable`);
+          }
+          const res = await sendTrade(conn, wallet, ps.ixs, doc.settings.maxFeeLamports);
+          row.txSignatures.push(res.signature);
+          if (res.outcome === 'landed-failed') throw new Error('tx landed but failed on-chain');
+        }
       }
 
       const afterAta = await this.tokenBalanceOf(wallet.publicKey, mint, 6000);
@@ -683,9 +710,24 @@ export class Trader {
         seller: wallet.publicKey,
         tokenAmountRaw,
         slippagePct: row.settingsAtEntry.slippagePct,
-      });
-      if (!j) throw new Error('no sell route — liquidity gone');
-      await this.sendJupiterTx(wallet, j.tx);
+      }).catch(() => null);
+      if (j) {
+        await this.sendJupiterTx(wallet, j.tx);
+      } else {
+        // no Jupiter route (freshly graduated coin): sell into the PumpSwap
+        // pool directly, otherwise the position would be un-sellable
+        const ps = await buildPumpSwapSell(conn, {
+          mint,
+          seller: wallet.publicKey,
+          tokenAmountRaw,
+          slippagePct: row.settingsAtEntry.slippagePct,
+        }).catch((e) => { throw new Error(`no sell route — liquidity gone (${(e as Error).message})`); });
+        const res = await sendTrade(conn, wallet, ps.ixs, row.settingsAtEntry.maxFeeLamports);
+        if (res.outcome === 'landed-failed') {
+          const parsed = await conn.getParsedTransaction(res.signature, { commitment: 'confirmed' }).catch(() => null);
+          throw new Error(`on-chain error: ${parsed?.meta?.err ? JSON.stringify(parsed.meta.err).slice(0, 200) : 'unknown'}`);
+        }
+      }
     }
 
     const balAfter = await conn.getBalance(wallet.publicKey, 'confirmed');
@@ -858,8 +900,12 @@ export class Trader {
       if (Date.now() - row.entryTime > 5 * 60_000 && this.sellingRows.size === 0) {
         const phase = await curvePhase(getConnection(), new PublicKey(row.mint)).catch(() => 'unknown' as const);
         if (phase === 'graduated') {
+          // only call it a rug when BOTH venues are dry: Jupiter has no route
+          // AND there is no PumpSwap pool. A Jupiter outage alone must never
+          // zero out a healthy position.
           const probe = await quote(new PublicKey(row.mint), WRAPPED_SOL, remaining, 5000).catch(() => null);
-          if (!probe) {
+          const pool = probe ? null : await findPumpSwapPool(getConnection(), new PublicKey(row.mint)).catch(() => null);
+          if (!probe && !pool) {
             await this.recordSell(row, 'RUG', remaining, 0, null, 'post-graduation liquidity gone');
             await this.closeRowIfDone(row);
             await notifyUser(userId, `🧨 <b>RUG SWEEP</b> — $${row.symbol}: liquidity dried up. Closed at 0.`);
@@ -943,6 +989,25 @@ export class Trader {
     }
   }
 
+  /** value `amountRaw` tokens off the PumpSwap pool (constant product) */
+  private async poolValueLamports(mint: PublicKey, amountRaw: bigint): Promise<number | null> {
+    const conn = getConnection();
+    const pool = await findPumpSwapPool(conn, mint);
+    if (!pool) return null;
+    const state = await (async () => {
+      const { OnlinePumpAmmSdk } = await import('@pump-fun/pump-swap-sdk');
+      return new OnlinePumpAmmSdk(conn).swapSolanaState(pool, mint); // user only shapes ATAs, price maths below is user-independent
+    })();
+    const base = Number(state.poolBaseAmount.toString());
+    const quote = Number(state.poolQuoteAmount.toString());
+    if (!Number.isFinite(base) || !Number.isFinite(quote) || base <= 0) return null;
+    const pricePerToken = quote / base; // SOL lamports per raw token
+    const amt = Number(amountRaw);
+    if (!Number.isFinite(amt)) return null;
+    // constant product: selling `amt` at the current marginal price (no fee haircut)
+    return Math.floor(pricePerToken * amt * 0.97);
+  }
+
   /** proceeds estimate (SOL lamports) for the remaining tokens of a row */
   async liveValueLamports(row: TradeRow): Promise<number | null> {
     const conn = getConnection();
@@ -955,9 +1020,11 @@ export class Trader {
         const cx = await loadPricingCtx(st.curve);
         return Number(sellSolLamportsForTokenAmount(cx, new BN(remaining.toString())).toString());
       }
-      const q = await quote(mint, WRAPPED_SOL, remaining, Math.max(100, Math.round(row.settingsAtEntry.slippagePct * 10_000)));
-      if (!q) return null;
-      return Number(BigInt(q.outAmount));
+      const q = await quote(mint, WRAPPED_SOL, remaining, Math.max(100, Math.round(row.settingsAtEntry.slippagePct * 10_000))).catch(() => null);
+      if (q && BigInt(q.outAmount) > 0n) return Number(BigInt(q.outAmount));
+      // no Jupiter price (freshly graduated coin): value it off the PumpSwap
+      // pool, otherwise TP / stop-loss / trailing could never trigger
+      return await this.poolValueLamports(mint, remaining).catch(() => null);
     } catch {
       return null;
     }

@@ -53,7 +53,9 @@ export const JITO_TIP_ACCOUNTS = (
 ).split(',').map((s) => s.trim()).filter((s) => s.length === 44);
 
 /** Jupiter aggregator quote API (free tier; optional key for higher limits). */
-export const JUPITER_QUOTE_API = process.env.JUPITER_API_URL || 'https://quote-api.jupiter.ag';
+// Jupiter retired the public v6 quote API — the live endpoint is the Swap API
+// v1 (lite). Override with JUPITER_API_URL if it ever moves again.
+export const JUPITER_QUOTE_API = (process.env.JUPITER_API_URL || 'https://lite-api.jup.ag/swap/v1').replace(/\/$/, '');
 export const JUPITER_API_KEY = (process.env.JUPITER_API_KEY || '').trim();
 
 /** pump.fun profile URL patterns accepted by /watch */
