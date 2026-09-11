@@ -7,7 +7,7 @@
 import { Keypair, PublicKey, VersionedTransaction, TransactionInstruction, Connection } from '@solana/web3.js';
 import BN from 'bn.js';
 import { getStore, Store } from './db';
-import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit, resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing, evaluateReputation, watchReputation, type TrailingStopConfig, type BuySizeConfig, type ReputationConfig, copySellFraction, positionMath, PositionMath, holdingDivergence } from './types';
+import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit, resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing, evaluateReputation, watchReputation, type TrailingStopConfig, type BuySizeConfig, type ReputationConfig, copySellFraction, positionMath, PositionMath, holdingDivergence, isRetryableSellError } from './types';
 import {
   curvePhase, fetchCurve, loadPricingCtx, sellSolLamportsForTokenAmount,
   buildCurveBuy, buildCurveSell, mcapSolLamports, priceSolPerTokenLamports,
@@ -730,14 +730,45 @@ export class Trader {
   }
 
   /**
-   * Execute one sell order for `tokenAmountRaw` of `row.mint`, returning
-   * realized SOL lamports (measured from the wallet balance delta).
+   * Sell with a slippage ladder. A copy-sell races the ape's own dump, so the
+   * first attempt uses your slippage and later ones widen it — the exit has to
+   * land even while the price is running. Only errors that a wider slippage or
+   * a fresh blockhash can fix are retried.
    */
   private async execSell(
     doc: UserDoc,
     wallet: Keypair,
     row: TradeRow,
     tokenAmountRaw: bigint,
+    opts: { attempts?: number; slippagePct?: number } = {},
+  ): Promise<number> {
+    const base = Number.isFinite(opts.slippagePct) ? Number(opts.slippagePct) : row.settingsAtEntry.slippagePct;
+    const attempts = Math.max(1, Math.min(4, Math.floor(opts.attempts ?? 3)));
+    let last: Error | null = null;
+    for (let i = 0; i < attempts; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 350 * i));
+      const slippagePct = i === 0 ? base : Math.min(50, Math.max(base, base * (i === 1 ? 2.5 : 6)));
+      try {
+        return await this.execSellOnce(doc, wallet, row, tokenAmountRaw, slippagePct);
+      } catch (e) {
+        last = e as Error;
+        if (!isRetryableSellError(last.message)) throw last;
+        console.warn(`[trader] sell attempt ${i + 1}/${attempts} failed (slippage ${slippagePct.toFixed(1)}%): ${last.message.slice(0, 140)}`);
+      }
+    }
+    throw last ?? new Error('sell failed');
+  }
+
+  /**
+   * Execute one sell order for `tokenAmountRaw` of `row.mint`, returning
+   * realized SOL lamports (measured from the wallet balance delta).
+   */
+  private async execSellOnce(
+    doc: UserDoc,
+    wallet: Keypair,
+    row: TradeRow,
+    tokenAmountRaw: bigint,
+    slippagePct: number,
   ): Promise<number> {
     const conn = getConnection();
     const mint = new PublicKey(row.mint);
@@ -750,7 +781,7 @@ export class Trader {
         mint,
         seller: wallet.publicKey,
         tokenAmount: new BN(tokenAmountRaw.toString()),
-        slippagePct: row.settingsAtEntry.slippagePct,
+        slippagePct,
         tokenProgram,
       });
       const res = await sendTrade(conn, wallet, plan.ixs, row.settingsAtEntry.maxFeeLamports);
@@ -763,7 +794,7 @@ export class Trader {
         mint,
         seller: wallet.publicKey,
         tokenAmountRaw,
-        slippagePct: row.settingsAtEntry.slippagePct,
+        slippagePct,
       }).catch(() => null);
       if (j) {
         await this.sendJupiterTx(wallet, j.tx);
@@ -774,7 +805,7 @@ export class Trader {
           mint,
           seller: wallet.publicKey,
           tokenAmountRaw,
-          slippagePct: row.settingsAtEntry.slippagePct,
+          slippagePct,
         }).catch((e) => { throw new Error(`no sell route — liquidity gone (${(e as Error).message})`); });
         const res = await sendTrade(conn, wallet, ps.ixs, row.settingsAtEntry.maxFeeLamports);
         if (res.outcome === 'landed-failed') {

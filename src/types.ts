@@ -241,6 +241,22 @@ export function soldFractionOf(
  *  - 'mirror' -> the same % the ape sold of their bag
  *  - unknown ape % (or no mirror) -> fall back to the exit rule's fraction
  */
+/** Sell errors worth another attempt — an exit races a moving price. */
+const SELL_RETRYABLE =
+  /slippage|price impact|exceed|no route|route not found|liquidity gone|liquidity is|block height|blockhash|expired|timeout|timed out|rate limit|too many requests|did not move tokens|failed to send|node is behind|unavailable|fetch failed|socket hang|econnreset|etimedout|on-chain error|instructionerror|"custom"|custom:\s*\d|429|50\d|503|502/i;
+const SELL_FATAL = /insufficient|not enough sol|no tokens left|nothing to sell|wallet missing|no wallet|no keypair|sold out/i;
+
+/**
+ * True when a failed sell deserves another attempt (usually at wider
+ * slippage) instead of giving up on the exit.
+ */
+export function isRetryableSellError(msg: string): boolean {
+  const m = String(msg ?? '');
+  if (!m) return false;
+  if (SELL_FATAL.test(m)) return false;
+  return SELL_RETRYABLE.test(m);
+}
+
 export function copySellFraction(
   mode: CopySellMode | null | undefined,
   apeFraction: number | null | undefined,

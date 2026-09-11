@@ -25,7 +25,13 @@ import path from 'node:path';
 const W = 1200;
 const H = 675;
 
-const BRAND = { mark: { x: 72, y: 108, size: 82 }, name: { x: 174, y: 73, size: 40 }, tag: { x: 172, y: 113, size: 17, ls: 3.8 } };
+const BRAND = { name: { x: 174, y: 73, size: 40 }, tag: { x: 172, y: 113, size: 17, ls: 3.8 } };
+
+/**
+ * The slot the brand mark fills, measured off the old "K" glyph so the real
+ * logo takes exactly the same space (centre + box, aspect preserved).
+ */
+const MARK = { cx: 107, cy: 79, w: 60, h: 56 };
 
 /* token chip is a fixed slot; the verdict pill grows with its text */
 const CHIP = { x: 48, y: 190, w: 131, h: 37 };
@@ -172,8 +178,7 @@ export function scorecardSvg(m: ScorecardModel): string {
   </defs>
   <rect width="${W}" height="${H}" fill="${C.bg}"/>
 
-  <!-- brand -->
-  <text x="${BRAND.mark.x}" y="${BRAND.mark.y}" font-family="${FONT_DISPLAY}" font-size="${BRAND.mark.size}" fill="${C.brand}">K</text>
+  <!-- brand (the mark itself is composited in at MARK) -->
   <text x="${BRAND.name.x}" y="${BRAND.name.y}" font-family="${FONT_DISPLAY}" font-size="${BRAND.name.size}" letter-spacing="1" fill="${C.white}">KACHIBOT</text>
   <text x="${BRAND.tag.x}" y="${BRAND.tag.y}" font-family="${FONT_DISPLAY}" font-size="${BRAND.tag.size}" letter-spacing="${BRAND.tag.ls}" fill="${C.tagline}">SOLANASNIPERBOT</text>
 
@@ -241,9 +246,49 @@ export function ensureCardFonts(): string | null {
   }
 }
 
+let markCache: Buffer | null | undefined;
+
+function markPath(): string | null {
+  const candidates = [
+    path.resolve(__dirname, '..', '..', 'assets', 'kachibot-mark.png'),
+    path.resolve(process.cwd(), 'assets', 'kachibot-mark.png'),
+  ];
+  return candidates.find((p) => fs.existsSync(p)) ?? null;
+}
+
+/** the real KACHIBOT mark, scaled to sit exactly where the old K did */
+async function markOverlay(sharp: typeof import('sharp').default): Promise<{ input: Buffer; left: number; top: number } | null> {
+  if (markCache === undefined) {
+    markCache = null;
+    try {
+      const p = markPath();
+      if (p) markCache = await sharp(p).ensureAlpha().png().toBuffer();
+    } catch {
+      markCache = null;
+    }
+  }
+  if (!markCache) return null;
+  const meta = await sharp(markCache).metadata();
+  const mw = meta.width ?? MARK.w;
+  const mh = meta.height ?? MARK.h;
+  const scale = Math.min(MARK.w / mw, MARK.h / mh);
+  const w = Math.max(1, Math.round(mw * scale));
+  const h = Math.max(1, Math.round(mh * scale));
+  return {
+    input: await sharp(markCache).resize(w, h, { fit: 'fill' }).png().toBuffer(),
+    left: Math.round(MARK.cx - w / 2),
+    top: Math.round(MARK.cy - h / 2),
+  };
+}
+
 /** render the card to a PNG buffer; throws if sharp is unavailable */
 export async function renderScorecard(m: ScorecardModel): Promise<Buffer> {
   ensureCardFonts();
   const sharp = (await import('sharp')).default;
-  return sharp(Buffer.from(scorecardSvg(m))).png().toBuffer();
+  const base = sharp(Buffer.from(scorecardSvg(m)));
+  const mark = await markOverlay(sharp).catch(() => null);
+  return (mark ? base.composite([mark]) : base).png().toBuffer();
 }
+
+/** where the brand mark lands, for tests and tooling */
+export const MARK_SLOT = MARK;

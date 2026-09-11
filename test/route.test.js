@@ -89,3 +89,43 @@ test('normalizeCopySellMode: backfills safely', () => {
   assert.equal(normalizeCopySellMode('mirror'), 'mirror');
   assert.equal(normalizeCopySellMode('nonsense'), 'mirror');
 });
+
+/* ------------------- copy-sell: exact fraction + retry policy ------------------- */
+
+const { isRetryableSellError } = require('../dist/types');
+const { tokensForFraction } = require('../dist/trader');
+
+test('copy-sell sells exactly the slice the ape sold', () => {
+  // mirror: their 50% -> our 50%; their 100% -> our 100%
+  assert.strictEqual(copySellFraction('mirror', 0.5, 1), 0.5);
+  assert.strictEqual(copySellFraction('mirror', 1, 1), 1);
+  assert.strictEqual(copySellFraction('mirror', 0.02, 1), 0.02);
+  // 'all' mode always exits fully, whatever the ape did
+  assert.strictEqual(copySellFraction('all', 0.25, 1), 1);
+  // unknown ape fraction falls back to the rule, never to zero
+  assert.strictEqual(copySellFraction('mirror', null, 1), 1);
+  assert.strictEqual(copySellFraction('mirror', 0, 0.5), 0.5);
+  // the share of the bag actually sent to market
+  const remaining = 1_000_000n, entry = 1_000_000n;
+  assert.strictEqual(tokensForFraction(remaining, entry, 0.5), 500_000n);
+  assert.strictEqual(tokensForFraction(remaining, entry, 1), 1_000_000n);
+  // a sliver left behind becomes dust -> sell it all instead
+  assert.strictEqual(tokensForFraction(remaining, entry, 0.995), 1_000_000n);
+});
+
+test('sell retry policy: widen slippage for moving-price errors, never for fatal ones', () => {
+  for (const m of [
+    'slippage tolerance exceeded',
+    'no route found for this pair',
+    'block height exceeded',
+    'sell tx did not move tokens (measurement: wallet balance unchanged)',
+    'on-chain error: {"InstructionError":[0,{"Custom":6001}]}',
+    'fetch failed',
+    '429 Too Many Requests',
+  ]) {
+    assert.strictEqual(isRetryableSellError(m), true, `should retry: ${m}`);
+  }
+  for (const m of ['insufficient funds for the transaction', 'no tokens left to sell', 'wallet missing', '', 'some unknown explosion']) {
+    assert.strictEqual(isRetryableSellError(m), false, `should not retry: ${m}`);
+  }
+});

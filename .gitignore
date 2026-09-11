@@ -20,3 +20,6 @@ kachibot-*.png
 
 # generated previews
 out/
+
+# the brand mark ships with the app (kachibot-*.png above is for local previews)
+!assets/kachibot-mark.png
