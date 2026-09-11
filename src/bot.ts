@@ -8,7 +8,7 @@ import { Telegraf, Markup, Context } from 'telegraf';
 import { PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { getConnection } from './chain/conn';
 import { getStore } from './db';
-import { UserDoc, WalletRecord, summarizeTrades, validateAndApply, resolveExit, normalizeExit, describeExit, parseExitInput, formatMcapUsd, EXIT_DEFAULT, resolveBuySize, describeBuySize, normalizeTrailing, evaluateReputation, watchReputation, describeConfirmHold, normalizeReputation, type ExitConfig, type ExitMode, type BuySizeConfig, scorecardStats } from './types';
+import { UserDoc, WalletRecord, summarizeTrades, validateAndApply, resolveExit, normalizeExit, describeExit, parseExitInput, formatMcapUsd, EXIT_DEFAULT, resolveBuySize, describeBuySize, normalizeTrailing, evaluateReputation, watchReputation, describeConfirmHold, normalizeReputation, type ExitConfig, type ExitMode, type BuySizeConfig, scorecardStats, positionMath } from './types';
 import { trader, bustWalletCache } from './trader';
 import { watcher } from './watcher';
 import { registerNotifier } from './notify';
@@ -16,7 +16,7 @@ import {
   decryptSecret, encryptSecret, generateMnemonic, keypairFromMnemonic,
   keypairFromSecret, keypairToSecret, parsePrivateKey,
 } from './crypto';
-import { solShort, sol, pctSigned, ago, durMs, scorecardText, pnlScorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
+import { solShort, sol, pctSigned, ago, durMs, scorecardText, pnlScorecardText, positionScorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
 import { parsePumpfunLink, WALLET_ADDR_RE, TELEGRAM_ALLOWED_USER_IDS, PUBLIC_URL } from './config';
 import { fetchCurve, isLiveCurve } from './chain/pump';
 import { getSolUsd } from './chain/price';
@@ -741,19 +741,20 @@ export class KachiBot {
     const open = await getStore().listTrades(this.uid(ctx), 'open');
     const t = open.find((x) => x.id === rowId);
     if (!t) return;
-    const value = await trader.liveValueLamports(t).catch(() => null);
-    const held = BigInt(t.entryTokenAmount) - t.partialSells.reduce((a, s) => a + BigInt(s.tokenAmountRaw), 0n);
-    const basisPer = Number(BigInt(t.entryTokenAmount)) > 0 ? t.spentLamports / Number(BigInt(t.entryTokenAmount)) : 0;
-    const mult = value !== null && basisPer > 0 ? value / (basisPer * Number(held)) : null;
-    const text = [
-      `📡 <b>POSITION</b> — ${t.name} <b>$${t.symbol}</b>`,
-      `spent ${solShort(t.spentLamports)} · ${ago(t.entryTime)}`,
-      `live ${value !== null ? `${solShort(value)}${mult !== null ? ` (${mult.toFixed(2)}x)` : ''}` : '…'}`,
-      t.entryMcapLamports ? `entry mcap ◎${(t.entryMcapLamports / 1e9).toFixed(4)}` : '',
-      `TP ${t.settingsAtEntry.tpMultiples.join('/')}x · SL -${Math.round(t.settingsAtEntry.stopLossPct * 100)}% · copy-sell ${t.settingsAtEntry.copySell ? (t.settingsAtEntry.copySellMode === 'all' ? 'all' : 'mirror') : 'off'}`,
-      `https://pump.fun/coin/${t.mint}`,
-    ].filter(Boolean).join('\n');
-    await this.answer(ctx, text, { kb: this.kb([[B('💸 Sell now', `sell:${t.id}`)], [B('📡 Positions', 'm:positions')]]) });
+    const [view, solUsd] = await Promise.all([
+      trader.positionView(t).catch(() => null),
+      getSolUsd().catch(() => null),
+    ]);
+    const v = view ?? { live: null, math: positionMath(t, null), pricePerToken: null, mcapLamports: null, entryPricePerToken: t.entryPriceLamports ?? null };
+    const text = positionScorecardText(t, v, solUsd);
+    const kbRows: BtnRow[] = [];
+    kbRows.push(row(
+      B('💸 Sell 25%', `sellfrac:${t.id}:25`),
+      B('💸 Sell 50%', `sellfrac:${t.id}:50`),
+      B('💸 Sell all', `sell:${t.id}`),
+    ));
+    kbRows.push(row(B('🔄 Refresh', `pos:${t.id}`), B('📡 Positions', 'm:positions')));
+    await this.answer(ctx, text, { kb: this.kb(kbRows) });
   }
 
   /** 🏆 account-wide PnL scorecard */
@@ -1182,7 +1183,14 @@ export class KachiBot {
       if (!target) return;
       await trader.sellOpenPosition(this.uid(ctx), rest, 'MANUAL');
     });
-    on('pos', async (ctx, rest) => { await this.positionCard(ctx, rest); });
+    on('pos', async (ctx, rest) => { await this.cbText(ctx, ' '); await this.positionCard(ctx, rest); });
+    on('sellfrac', async (ctx, rest) => {
+      const [rowId, pctRaw] = String(rest).split(':');
+      const pct = Number(pctRaw);
+      if (!rowId || !Number.isFinite(pct) || pct <= 0) return;
+      await this.cbText(ctx, `💸 selling ${pct}%…`);
+      await trader.sellFraction(this.uid(ctx), rowId, Math.min(1, pct / 100), 'MANUAL').catch(() => null);
+    });
     on('score', async (ctx, rest) => {
       const all = await getStore().listTrades(this.uid(ctx));
       const t = all.find((x) => x.id === rest);
@@ -1190,8 +1198,9 @@ export class KachiBot {
       const closed = all.filter((x) => x.status === 'closed');
       const running = closed.reduce((a, x) => a + (x.pnlLamports ?? 0), 0);
       const seq = Math.max(1, closed.findIndex((x) => x.id === rest) + 1);
+      const solUsd = await getSolUsd().catch(() => null);
       await this.cbText(ctx, ' ');
-      await this.answer(ctx, scorecardText(t, seq, running), { kb: this.kb([[B('📖 History', 'm:history')]]) });
+      await this.answer(ctx, scorecardText(t, seq, running, solUsd), { kb: this.kb([[B('📖 History', 'm:history')]]) });
     });
     on('m:pnl', async (ctx) => { await this.cbText(ctx, ' '); await this.showPnl(ctx); });
     on('hist', async (ctx, rest) => { await this.cbText(ctx, ' '); await this.showHistory(ctx, Number(rest) || 0); });

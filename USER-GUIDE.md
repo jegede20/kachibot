@@ -178,6 +178,24 @@ One card for the whole account — tap **🏆 PnL** on the main screen or from �
 
 Only closed trades count as realized. Open positions show unrealized PnL priced live.
 
+## 📡 Live position card
+
+Tap any running trade in 📡 Positions for its exchange-style card:
+
+| Line | What it tells you |
+|---|---|
+| Headline | Profit in SOL and USD, the multiple, and your % on what you spent |
+| position / spent / banked | Worth now · what it cost · what partial sells already banked |
+| entry mcap → now mcap | Where you got in vs where it trades now (+% move) |
+| avg entry / now | Price per token then and now |
+| bag | How much of the position is still open vs already banked |
+| peak / opened / copied | Best multiple seen, when it opened, which wallet you copied |
+| guards | TP ladder, stop-loss, trailing, break-even state |
+
+Buttons: **💸 Sell 25% / 50% / all** (take profit and keep a moonbag) · **🔄 Refresh** re-prices it.
+
+The headline counts SOL already banked plus what's still held, so partially sold positions show your true profit.
+
 If a buy doesn't happen, **History** shows why: slippage too tight, cap hit, cooldown, wallet empty, honeypot, weak ape, or instant dump.
 
 ---

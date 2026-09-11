@@ -184,7 +184,7 @@ test('format helpers render safe text', () => {
   }, 1, 2e9);
   assert.ok(card.includes('TRADE CARD #1'));
   assert.ok(card.includes('&lt;Coin&gt;')); // escaped
-  assert.ok(card.includes('◎2.000'));
+  assert.ok(card.includes('+2.0000 SOL')); // money is spelled out, never the scope glyph
 });
 
 

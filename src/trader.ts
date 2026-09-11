@@ -7,7 +7,7 @@
 import { Keypair, PublicKey, VersionedTransaction, TransactionInstruction, Connection } from '@solana/web3.js';
 import BN from 'bn.js';
 import { getStore, Store } from './db';
-import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit, resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing, evaluateReputation, watchReputation, type TrailingStopConfig, type BuySizeConfig, type ReputationConfig, copySellFraction } from './types';
+import { UserDoc, TradeRow, ExitReason, dayKey, resolveExit, normalizeExit, exitSellFraction, describeExit, resolveBuySize, trailingExitMultiple, breakEvenArmed, normalizeTrailing, evaluateReputation, watchReputation, type TrailingStopConfig, type BuySizeConfig, type ReputationConfig, copySellFraction, positionMath, PositionMath } from './types';
 import {
   curvePhase, fetchCurve, loadPricingCtx, sellSolLamportsForTokenAmount,
   buildCurveBuy, buildCurveSell, mcapSolLamports, priceSolPerTokenLamports,
@@ -1030,6 +1030,33 @@ export class Trader {
         return;
       }
     }
+  }
+
+  /**
+   * Everything the live POSITION card shows: current value, PnL against cost,
+   * and the market data behind it (price per token + market cap).
+   * One pricing call, reused for value, price and mcap so they always agree.
+   */
+  async positionView(row: TradeRow): Promise<{
+    live: number | null;
+    math: PositionMath;
+    pricePerToken: number | null;
+    mcapLamports: number | null;
+    entryPricePerToken: number | null;
+  }> {
+    const live = await this.liveValueLamports(row);
+    const math = positionMath(row, live);
+    const remaining = this.remainingTokens(row);
+    const pricePerToken = live !== null && remaining > 0n ? live / Number(remaining) : null;
+    const supply = await this.mintSupply(new PublicKey(row.mint)).catch(() => null);
+    const mcapLamports = pricePerToken !== null && supply ? Math.floor(pricePerToken * supply) : null;
+    return {
+      live,
+      math,
+      pricePerToken,
+      mcapLamports,
+      entryPricePerToken: row.entryPriceLamports ?? null,
+    };
   }
 
   /** value `amountRaw` tokens off the PumpSwap pool (constant product) */

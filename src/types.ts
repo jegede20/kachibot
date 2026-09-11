@@ -620,6 +620,52 @@ export function scorecardStats(
   };
 }
 
+export interface PositionMath {
+  /** tokens still held (raw) */
+  remaining: bigint;
+  /** share of the original bag already sold, 0..1 */
+  soldFraction: number;
+  /** SOL already banked from partial sells */
+  realizedFromPartials: number;
+  /** live SOL value of what is left */
+  positionValue: number;
+  /** banked + still held */
+  totalReturn: number;
+  pnl: number;
+  pnlPct: number;
+  /** gross multiple on the whole position (banked + held) / spent */
+  multiple: number;
+}
+
+/**
+ * Live PnL for an OPEN position: what it is worth right now plus what has
+ * already been banked, measured against what it cost.
+ * `liveValueLamports` is the SOL value of the REMAINING tokens (null when the
+ * market cannot be priced — then everything degrades to the banked part).
+ */
+export function positionMath(row: TradeRow, liveValueLamports: number | null): PositionMath {
+  const entry = (() => { try { return BigInt(row.entryTokenAmount || '0'); } catch { return 0n; } })();
+  const soldTokens = (row.partialSells || []).reduce((a, s) => {
+    try { return a + BigInt(s.tokenAmountRaw || '0'); } catch { return a; }
+  }, 0n);
+  const remaining = entry > soldTokens ? entry - soldTokens : 0n;
+  const realizedFromPartials = (row.partialSells || []).reduce((a, s) => a + Math.max(0, s.quoteLamports || 0), 0);
+  const positionValue = Math.max(0, liveValueLamports ?? 0);
+  const spent = Math.max(0, row.spentLamports || 0);
+  const totalReturn = realizedFromPartials + positionValue;
+  const pnl = totalReturn - spent;
+  return {
+    remaining,
+    soldFraction: entry > 0n ? Number(soldTokens) / Number(entry) : 0,
+    realizedFromPartials,
+    positionValue,
+    totalReturn,
+    pnl,
+    pnlPct: spent > 0 ? pnl / spent : 0,
+    multiple: spent > 0 ? totalReturn / spent : 0,
+  };
+}
+
 export function summarizeTrades(rows: TradeRow[]): TradeHistorySummary {
   const closed = rows.filter((r) => r.status === 'closed');
   const wins = closed.filter((r) => (r.pnlLamports ?? 0) > 0);

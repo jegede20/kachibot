@@ -3,7 +3,7 @@
  * Consistent voice for every message: scope badge, flat tone, no generic-bot
  * templating. All user-supplied strings are HTML-escaped.
  */
-import { TradeRow, PnlStats } from './types';
+import { TradeRow, PnlStats, PositionMath } from './types';
 
 export const KACHI = 'KACHIBOT';
 export const LOGO = '◉K'; // scope mark + monogram (flat, chunky)
@@ -94,7 +94,7 @@ function header(emoji: string, tag: string): string {
 }
 
 /** Card for a fully closed trade — the scorecard. */
-export function scorecardText(t: TradeRow, seqNo: number, runningPnlLamports: number): string {
+export function scorecardText(t: TradeRow, seqNo: number, runningPnlLamports: number, solUsd: number | null = null): string {
   const pnl = t.pnlLamports ?? 0;
   const x = t.netMultiple ?? 0;
   const bull = pnl >= 0;
@@ -105,22 +105,41 @@ export function scorecardText(t: TradeRow, seqNo: number, runningPnlLamports: nu
   lines.push(T);
   lines.push(`${bull ? '📗' : '📕'} ${esc(t.name)} <b>$${esc(t.symbol)}</b>`);
   lines.push(`${T} ${D.repeat(46)}`);
-  lines.push(`${T} pnl        ${pnl >= 0 ? '+' : ''}${solShort(pnl)}  (${pctSigned(pnl / Math.max(1, t.spentLamports))})`);
+  lines.push(`${T} pnl        ${sol4Signed(pnl)}  (${pctSigned(pnl / Math.max(1, t.spentLamports))})${usdShort(pnl, solUsd) ? ` · ${usdShort(pnl, solUsd)}` : ''}`);
   lines.push(`${T} multiple   ${x.toFixed(2)}x`);
   lines.push(`${T} exit       ${reason}`);
   lines.push(`${T} hold       ${t.holdMs !== null ? durMs(t.holdMs) : '—'}`);
+  lines.push(`${T} bought     ${sol4(t.spentLamports)}`);
+  lines.push(`${T} sold       ${sol4(Math.max(0, t.realizedQuoteLamports ?? t.spentLamports + (t.pnlLamports ?? 0)))}`);
   lines.push(`${T} ape→exit   ${new Date(t.entryTime).toISOString().slice(11, 19)} → ${t.exitTime ? new Date(t.exitTime).toISOString().slice(11, 19) : '—'} UTC`);
-  lines.push(`${T} entry mcap ${mcapText(t.entryMcapLamports)}${t.partialSells.length ? ` · ${t.partialSells.length} sell${t.partialSells.length > 1 ? 's' : ''}` : ''}`);
+  lines.push(`${T} entry mcap ${mcapUsd(t.entryMcapLamports, solUsd) ?? mcapText(t.entryMcapLamports)}${t.partialSells.length ? ` · ${t.partialSells.length} sell${t.partialSells.length > 1 ? 's' : ''}` : ''}`);
   if (t.walletBalanceBefore !== null && t.walletBalanceAfter !== null) {
-    lines.push(`${T} wallet     ${solShort(t.walletBalanceBefore)} → ${solShort(t.walletBalanceAfter)}`);
+    lines.push(`${T} wallet     ${sol4(t.walletBalanceBefore)} → ${sol4(t.walletBalanceAfter)}`);
   }
   if (t.watchedLabel) lines.push(`${T} copied     ${esc(t.watchedLabel)}`);
   lines.push(T);
   lines.push(`${T} ${vibe} ${bull ? 'bull scored 🎯' : 'rug alert — stay frosty'}`);
   lines.push(`${T} ${D.repeat(46)}`);
-  lines.push(`running PnL: ${runningPnlLamports >= 0 ? '+' : ''}${solShort(runningPnlLamports)}`);
+  lines.push(`running PnL: ${sol4Signed(runningPnlLamports)}`);
   lines.push(chartLink(t.mint));
   return lines.join('\n');
+}
+
+/** compact USD: "$45.9K", "$1.23M" — for market caps */
+export function usdCompact(usd: number): string {
+  const a = Math.abs(usd);
+  const sign = usd < 0 ? '-' : '';
+  if (a >= 1e9) return `${sign}$${(a / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${sign}$${(a / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return `${sign}$${(a / 1e3).toFixed(1)}K`;
+  return `${sign}$${a.toFixed(0)}`;
+}
+
+/** market cap in USD, or in SOL when no price feed is available */
+export function mcapUsd(lamports: number | null | undefined, solUsd: number | null): string | null {
+  if (!lamports || lamports <= 0 || !Number.isFinite(lamports)) return null;
+  if (solUsd && solUsd > 0) return usdCompact((lamports / 1e9) * solUsd);
+  return `${fmtNum(lamports / 1e9)} SOL`;
 }
 
 /** money-style SOL: "5.9360 SOL" — 4 dp, unit spelled out, never the scope glyph */
@@ -216,6 +235,95 @@ export function pnlScorecardText(st: PnlStats, solUsd: number | null = null): st
   L.push(rule);
   L.push(`${T} last 7d: ${st.last7.closed} closed · ${signed(st.last7.realizedLamports)}`);
   return L.join('\n');
+}
+
+export interface PositionCardView {
+  live: number | null;
+  math: PositionMath;
+  pricePerToken: number | null;
+  mcapLamports: number | null;
+  entryPricePerToken: number | null;
+}
+
+/**
+ * The live POSITION card — a running trade, exchange style: what it is worth
+ * now, what it cost, entry vs current market cap, and how long it has run.
+ */
+export function positionScorecardText(
+  t: TradeRow,
+  v: PositionCardView,
+  solUsd: number | null = null,
+): string {
+  const L: string[] = [];
+  const rule = D.repeat(26);
+  const two = (label: string, value: string) => `${T} ${label.padEnd(11)}${value}`;
+  const m = v.math;
+  const up = m.pnl >= 0;
+  const priced = v.live !== null;
+
+  L.push(header('📡', 'POSITION'));
+  L.push(`${T} ${esc(t.name)} <b>$${esc(t.symbol)}</b>`);
+  L.push(rule);
+
+  // headline: profit on the whole position (banked + still held)
+  if (priced) {
+    L.push(`${up ? '🟢' : '🔴'} <b>${sol4Signed(m.pnl)}</b>${usdShort(m.pnl, solUsd) ? `  <b>${usdShort(m.pnl, solUsd)}</b>` : ''}`);
+    L.push(`${T} <b>${m.multiple.toFixed(2)}x</b> · ${pctSigned(m.pnlPct)} on ${sol4(t.spentLamports)} · ${ago(t.entryTime)}`);
+  } else {
+    L.push(`${T} market price unavailable right now`);
+    L.push(`${T} ${sol4(t.spentLamports)} in · ${ago(t.entryTime)}`);
+  }
+  L.push(rule);
+
+  // position / cost block (the two-column BonkBot idea, stacked for Telegram)
+  if (priced) L.push(two('position', sol4(m.positionValue)));
+  L.push(two('spent', sol4(t.spentLamports)));
+  if (m.realizedFromPartials > 0) L.push(two('banked', sol4(m.realizedFromPartials)));
+
+  // market data: entry vs now
+  const nowMcap = mcapUsd(v.mcapLamports, solUsd);
+  const entryMcap = mcapUsd(t.entryMcapLamports, solUsd);
+  if (entryMcap) L.push(two('entry mcap', entryMcap));
+  if (nowMcap) L.push(two('now mcap', `${nowMcap}${entryMcap ? ` (${mcapDelta(v.mcapLamports, t.entryMcapLamports)})` : ''}`));
+  if (v.entryPricePerToken !== null && v.entryPricePerToken > 0) {
+    L.push(two('avg entry', priceText(v.entryPricePerToken)));
+  }
+  if (v.pricePerToken !== null && v.pricePerToken > 0) {
+    L.push(two('now', priceText(v.pricePerToken)));
+  }
+
+  L.push(rule);
+  const bagLeft = Math.max(0, Math.round((1 - m.soldFraction) * 100));
+  L.push(two('bag', `${bagLeft}% still open${m.soldFraction > 0 ? ` · ${Math.round(m.soldFraction * 100)}% banked` : ''}`));
+  if (t.peakMultiple !== null && t.peakMultiple !== undefined && t.peakMultiple > 0) {
+    L.push(two('peak', `${t.peakMultiple.toFixed(2)}x`));
+  }
+  L.push(two('opened', `${new Date(t.entryTime).toISOString().slice(11, 16)} UTC · ${durMs(Date.now() - t.entryTime)} ago`));
+  if (t.watchedLabel) L.push(two('copied', esc(t.watchedLabel)));
+
+  const st = t.settingsAtEntry;
+  const guards: string[] = [`TP ${st.tpMultiples.join('/')}x`, `SL -${Math.round(st.stopLossPct * 100)}%`];
+  if (st.trailing?.enabled) guards.push('trailing');
+  if (st.breakEvenStop) guards.push('break-even');
+  L.push(two('guards', guards.join(' · ')));
+  L.push(rule);
+  L.push(chartLink(t.mint));
+  return L.join('\n');
+}
+
+/** price per token, readable at any scale */
+function priceText(pricePerTokenLamports: number): string {
+  const solPerToken = pricePerTokenLamports / 1e9;
+  if (solPerToken <= 0) return '—';
+  if (solPerToken >= 0.001) return `${solPerToken.toFixed(6)} SOL`;
+  return `${solPerToken.toExponential(2)} SOL`;
+}
+
+/** "+62%" style move between two market caps */
+function mcapDelta(nowLamports: number | null, entryLamports: number | null): string {
+  if (!nowLamports || !entryLamports || entryLamports <= 0) return '';
+  const pct = (nowLamports / entryLamports - 1) * 100;
+  return `${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%`;
 }
 
 export function exitReasonLabel(r: string | null | undefined): string {
