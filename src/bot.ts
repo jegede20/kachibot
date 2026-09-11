@@ -8,13 +8,7 @@ import { Telegraf, Markup, Context } from 'telegraf';
 import { PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { getConnection } from './chain/conn';
 import { getStore } from './db';
-import {
-  UserDoc, WalletRecord, summarizeTrades, validateAndApply,
-  resolveExit, normalizeExit, describeExit, parseExitInput, formatMcapUsd, EXIT_DEFAULT,
-  resolveBuySize, describeBuySize, normalizeTrailing,
-  evaluateReputation, watchReputation, describeConfirmHold, normalizeReputation,
-  type ExitConfig, type ExitMode, type BuySizeConfig,
-} from './types';
+import { UserDoc, WalletRecord, summarizeTrades, validateAndApply, resolveExit, normalizeExit, describeExit, parseExitInput, formatMcapUsd, EXIT_DEFAULT, resolveBuySize, describeBuySize, normalizeTrailing, evaluateReputation, watchReputation, describeConfirmHold, normalizeReputation, type ExitConfig, type ExitMode, type BuySizeConfig, scorecardStats } from './types';
 import { trader, bustWalletCache } from './trader';
 import { watcher } from './watcher';
 import { registerNotifier } from './notify';
@@ -22,9 +16,10 @@ import {
   decryptSecret, encryptSecret, generateMnemonic, keypairFromMnemonic,
   keypairFromSecret, keypairToSecret, parsePrivateKey,
 } from './crypto';
-import { solShort, sol, pctSigned, ago, durMs, scorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
+import { solShort, sol, pctSigned, ago, durMs, scorecardText, pnlScorecardText, helpIntro, welcomeIntro, LOGO, exitReasonLabel } from './format';
 import { parsePumpfunLink, WALLET_ADDR_RE, TELEGRAM_ALLOWED_USER_IDS, PUBLIC_URL } from './config';
 import { fetchCurve, isLiveCurve } from './chain/pump';
+import { getSolUsd } from './chain/price';
 import crypto from 'node:crypto';
 
 type Btn = { label: string; data: string };
@@ -227,7 +222,8 @@ export class KachiBot {
     const kb = this.kb([
       row(B('💼 Wallet', 'm:wallet'), B('⚙️ Settings', 'm:settings')),
       row(B('👀 Watchlist', 'm:watch'), B('📡 Positions', 'm:positions')),
-      row(B('📖 History', 'm:history'), B('🔔 Alerts', 'm:alerts')),
+      row(B('🏆 PnL', 'm:pnl'), B('📖 History', 'm:history')),
+      row(B('🔔 Alerts', 'm:alerts')),
       row(B('🧯 Panic sell-all', 'panic')),
     ]);
     await this.answer(ctx, text, { kb });
@@ -760,6 +756,23 @@ export class KachiBot {
     await this.answer(ctx, text, { kb: this.kb([[B('💸 Sell now', `sell:${t.id}`)], [B('📡 Positions', 'm:positions')]]) });
   }
 
+  /** 🏆 account-wide PnL scorecard */
+  private async showPnl(ctx: Context): Promise<void> {
+    const userId = this.uid(ctx);
+    const all = await getStore().listTrades(userId);
+    const open = all.filter((t) => t.status === 'open');
+    // price at most 5 open positions so the card stays snappy
+    const unrealizedByRow: Record<string, number | null> = {};
+    for (const t of open.slice(0, 5)) {
+      unrealizedByRow[t.id] = await trader.liveValueLamports(t).catch(() => null);
+    }
+    const solUsd = await getSolUsd().catch(() => null);
+    const st = scorecardStats(all, { unrealizedByRow });
+    await this.answer(ctx, pnlScorecardText(st, solUsd), {
+      kb: this.kb([[B('📖 History', 'm:history'), B('📡 Positions', 'm:positions')], [B('🔙 Main', 'm:main')]]),
+    });
+  }
+
   /* -------------------------------- history ------------------------------- */
 
   private async showHistory(ctx: Context, page: number): Promise<void> {
@@ -793,6 +806,7 @@ export class KachiBot {
     nav.push(B(`p ${pageSafe + 1}/${pages}`, 'noop'));
     if (pageSafe < pages - 1) nav.push(B('next ➡️', `hist:${pageSafe + 1}`));
     if (nav.length > 1) kbRows.unshift(nav);
+    kbRows.push(row(B('🏆 PnL scorecard', 'm:pnl')));
     kbRows.push(row(B('🔙 Main', 'm:main')));
     await this.answer(ctx, lines.join('\n'), { kb: this.kb(kbRows) });
   }
@@ -1179,6 +1193,7 @@ export class KachiBot {
       await this.cbText(ctx, ' ');
       await this.answer(ctx, scorecardText(t, seq, running), { kb: this.kb([[B('📖 History', 'm:history')]]) });
     });
+    on('m:pnl', async (ctx) => { await this.cbText(ctx, ' '); await this.showPnl(ctx); });
     on('hist', async (ctx, rest) => { await this.cbText(ctx, ' '); await this.showHistory(ctx, Number(rest) || 0); });
     on('panic', async (ctx) => { await this.cbText(ctx, ' '); await this.confirmPanic(ctx); });
     on('a', async (ctx, rest) => {

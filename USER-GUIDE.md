@@ -161,7 +161,22 @@ While a moonbag is open, stop-loss, trailing, break-even, max hold and the TP la
 4. Exits are automatic: trailing stop → break-even → max hold → stop-loss → TP ladder → copy-sell (your exit rule) → rug guard.
 5. On close you get a **trade card**: PnL in SOL and %, hold time, and why it exited.
 
-**Screens:** 📡 Positions (open trades, 💸 sell, 🧯 Panic sell-all) · 📖 History (all trades + 🏆 scorecards) · 🔔 Alerts (snipes / sells / activity) · 🧯 Panic (dump everything, PIN required).
+**Screens:** 📡 Positions (open trades, 💸 sell, 🧯 Panic sell-all) · 📖 History (all trades + 🏆 trade cards) · 🔔 Alerts (snipes / sells / activity) · 🧯 Panic (dump everything, PIN required).
+
+## 🏆 PnL scorecard
+
+One card for the whole account — tap **🏆 PnL** on the main screen or from 📖 History:
+
+| Line | What it tells you |
+|---|---|
+| Headline | Total profit in SOL and USD, plus your return % on everything you copied |
+| wins / avg win / avg loss / best / worst | How that profit was made |
+| bought → sold | SOL in vs SOL back |
+| who earned it | Profit per watched wallet, with that ape's win rate — the copy-trader's edge |
+| open / live pnl | What your open bags are worth right now |
+| last 7d | Recent form |
+
+Only closed trades count as realized. Open positions show unrealized PnL priced live.
 
 If a buy doesn't happen, **History** shows why: slippage too tight, cap hit, cooldown, wallet empty, honeypot, weak ape, or instant dump.
 

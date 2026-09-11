@@ -3,7 +3,7 @@
  * Consistent voice for every message: scope badge, flat tone, no generic-bot
  * templating. All user-supplied strings are HTML-escaped.
  */
-import { TradeRow } from './types';
+import { TradeRow, PnlStats } from './types';
 
 export const KACHI = 'KACHIBOT';
 export const LOGO = '◉K'; // scope mark + monogram (flat, chunky)
@@ -121,6 +121,96 @@ export function scorecardText(t: TradeRow, seqNo: number, runningPnlLamports: nu
   lines.push(`running PnL: ${runningPnlLamports >= 0 ? '+' : ''}${solShort(runningPnlLamports)}`);
   lines.push(chartLink(t.mint));
   return lines.join('\n');
+}
+
+/** money-style SOL: "5.9360 SOL" — 4 dp, unit spelled out, never the scope glyph */
+export function sol4(lamports: number): string {
+  const v = Number.isFinite(lamports) ? lamports / 1e9 : 0;
+  return `${v.toFixed(4)} SOL`;
+}
+
+/** signed money-style SOL: "+5.9360 SOL" / "-0.1800 SOL" */
+export function sol4Signed(lamports: number): string {
+  return `${lamports >= 0 ? '+' : '-'}${sol4(Math.abs(lamports))}`;
+}
+
+/** USD text for a SOL amount; pass the live SOL price (or null to hide USD) */
+export function usdShort(lamports: number, solUsd: number | null | undefined): string | null {
+  if (!solUsd || !Number.isFinite(solUsd) || solUsd <= 0) return null;
+  const v = (lamports / 1e9) * solUsd;
+  const sign = v >= 0 ? '+' : '-';
+  const a = Math.abs(v);
+  const txt = (a >= 1000 ? a.toFixed(0) : a.toFixed(2)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${sign}$${txt}`;
+}
+
+/**
+ * The PnL scorecard: one account-wide card — headline profit, how it was made,
+ * which apes earned it, and what is still open.
+ */
+export function pnlScorecardText(st: PnlStats, solUsd: number | null = null): string {
+  const L: string[] = [];
+  const rule = D.repeat(26);
+  const two = (label: string, value: string) => `${T} ${label.padEnd(10)}${value}`;
+  const signed = (lamports: number) => sol4Signed(lamports);
+  const usd = (lamports: number) => usdShort(lamports, solUsd);
+
+  if (!st.closed && !st.openCount) {
+    L.push(header('🏆', 'PnL SCORECARD'));
+    L.push(rule);
+    L.push(`${T} no closed copies yet — the card fills itself`);
+    L.push(`${T} the moment your first ape exits.`);
+    L.push(rule);
+    L.push(`${T} tip: 👀 Watchlist → add a wallet you trust.`);
+    return L.join('\n');
+  }
+
+  const total = st.realizedLamports;
+  const up = total >= 0;
+
+  L.push(header('🏆', 'PnL SCORECARD'));
+  L.push(rule);
+  // headline: profit, then USD + return on what was copied
+  L.push(`${up ? '🟢' : '🔴'} <b>${signed(total)}</b>${usd(total) ? `  <b>${usd(total)}</b>` : ''}`);
+  if (st.closed) {
+    L.push(`${T} ${pctSigned(st.returnPct)} on ${sol4(st.boughtLamports)} copied across ${st.closed} trade${st.closed === 1 ? '' : 's'}`);
+  }
+  L.push(rule);
+
+  if (st.closed) {
+    L.push(two('wins', `${st.wins}/${st.closed} (${Math.round(st.winRate * 100)}%)`));
+    if (st.wins) L.push(two('avg win', `${signed(st.avgWinLamports)} · ${st.avgWinMultiple.toFixed(2)}x`));
+    if (st.losses) L.push(two('avg loss', `${signed(st.avgLossLamports)}`));
+    if (st.best) L.push(two('best', `$${esc(st.best.symbol)} ${signed(st.best.pnlLamports)} (${st.best.multiple.toFixed(2)}x)`));
+    if (st.worst) L.push(two('worst', `$${esc(st.worst.symbol)} ${signed(st.worst.pnlLamports)} (${st.worst.multiple.toFixed(2)}x)`));
+    if (st.streak.count > 1) {
+      L.push(two('streak', st.streak.kind === 'W' ? `🔥 ${st.streak.count} wins in a row` : `🧊 ${st.streak.count} losses in a row`));
+    }
+    if (st.avgHoldMs !== null) L.push(two('avg hold', durMs(st.avgHoldMs)));
+    L.push(rule);
+    L.push(two('bought', sol4(st.boughtLamports)));
+    L.push(two('sold', sol4(st.soldLamports)));
+  }
+
+  if (st.byApe.length) {
+    L.push(rule);
+    L.push(`${T} <b>who earned it</b>`);
+    for (const a of st.byApe.slice(0, 3)) {
+      const wr = a.closed ? ` · ${Math.round((a.wins / a.closed) * 100)}% win` : '';
+      L.push(`${T} ${a.pnlLamports >= 0 ? '🟢' : '🔴'} ${esc(a.label)} <b>${signed(a.pnlLamports)}</b>${wr} (${a.closed})`);
+    }
+  }
+
+  if (st.openCount) {
+    L.push(rule);
+    const unreal = st.unrealizedLamports;
+    L.push(two('open', `${st.openCount} position${st.openCount === 1 ? '' : 's'} · ${sol4(st.openCostLamports)} in`));
+    if (unreal !== null) L.push(two('live pnl', `${unreal >= 0 ? '🟢' : '🔴'} <b>${signed(unreal)}</b>${usd(unreal) ? ` ${usd(unreal)}` : ''}`));
+  }
+
+  L.push(rule);
+  L.push(`${T} last 7d: ${st.last7.closed} closed · ${signed(st.last7.realizedLamports)}`);
+  return L.join('\n');
 }
 
 export function exitReasonLabel(r: string | null | undefined): string {

@@ -474,6 +474,149 @@ export interface TradeHistorySummary {
   avgReturnPct: number;
 }
 
+export interface PnlApeLine {
+  label: string;
+  closed: number;
+  wins: number;
+  pnlLamports: number;
+}
+
+export interface PnlStats {
+  closed: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  /** realized profit/loss in lamports (closed trades only) */
+  realizedLamports: number;
+  /** SOL put into closed trades */
+  boughtLamports: number;
+  /** SOL that came back from closed trades */
+  soldLamports: number;
+  /** realized / bought */
+  returnPct: number;
+  avgWinLamports: number;
+  avgLossLamports: number;
+  avgWinMultiple: number;
+  best: { symbol: string; pnlLamports: number; multiple: number } | null;
+  worst: { symbol: string; pnlLamports: number; multiple: number } | null;
+  streak: { kind: 'W' | 'L' | '-'; count: number };
+  avgHoldMs: number | null;
+  byApe: PnlApeLine[];
+  openCount: number;
+  openCostLamports: number;
+  /** how many open rows we could actually price (0 = unrealized unknown) */
+  openPriced: number;
+  /** live value of open positions minus what they cost (null when unpriceable) */
+  unrealizedLamports: number | null;
+  last7: { closed: number; realizedLamports: number };
+  firstTradeAt: number | null;
+}
+
+/**
+ * Everything the PnL scorecard shows, computed from raw trade rows.
+ * `unrealizedByRow` maps an OPEN row id to its current SOL value (live pricing
+ * lives outside this pure helper so it stays testable).
+ */
+export function scorecardStats(
+  rows: TradeRow[],
+  opts: { unrealizedByRow?: Record<string, number | null>; now?: number } = {},
+): PnlStats {
+  const now = opts.now ?? Date.now();
+  const closed = rows.filter((r) => r.status === 'closed');
+  const open = rows.filter((r) => r.status === 'open');
+  const closedSorted = [...closed].sort((a, b) => (a.exitTime ?? a.entryTime) - (b.exitTime ?? b.entryTime));
+
+  const pnlOf = (r: TradeRow): number => r.pnlLamports ?? 0;
+  const wins = closedSorted.filter((r) => pnlOf(r) > 0);
+  const losses = closedSorted.filter((r) => pnlOf(r) <= 0);
+  const realized = closedSorted.reduce((a, r) => a + pnlOf(r), 0);
+  const bought = closedSorted.reduce((a, r) => a + Math.max(0, r.spentLamports || 0), 0);
+  const sold = bought + realized;
+
+  const sum = (list: TradeRow[], f: (r: TradeRow) => number): number => list.reduce((a, r) => a + f(r), 0);
+  const avgWin = wins.length ? sum(wins, pnlOf) / wins.length : 0;
+  const avgLoss = losses.length ? sum(losses, pnlOf) / losses.length : 0;
+  const avgWinMultiple = wins.length
+    ? wins.reduce((a, r) => a + (r.netMultiple ?? 0), 0) / wins.length
+    : 0;
+
+  const pick = (list: TradeRow[], which: 'max' | 'min'): PnlStats['best'] => {
+    if (!list.length) return null;
+    const top = list.reduce((a, r) => (which === 'max' ? (pnlOf(r) > pnlOf(a) ? r : a) : (pnlOf(r) < pnlOf(a) ? r : a)));
+    return { symbol: top.symbol || top.mint.slice(0, 6), pnlLamports: pnlOf(top), multiple: top.netMultiple ?? 0 };
+  };
+  const best = pick(closedSorted.filter((r) => pnlOf(r) > 0), 'max');
+  const worst = pick(closedSorted.filter((r) => pnlOf(r) < 0), 'min');
+
+  // trailing win/loss streak, most recent close last
+  let streak: PnlStats['streak'] = { kind: '-', count: 0 };
+  for (let i = closedSorted.length - 1; i >= 0; i--) {
+    const kind = pnlOf(closedSorted[i]) > 0 ? 'W' : 'L';
+    if (streak.count === 0) streak = { kind, count: 1 };
+    else if (streak.kind === kind) streak = { kind, count: streak.count + 1 };
+    else break;
+  }
+
+  const holds = closedSorted.filter((r) => typeof r.holdMs === 'number' && (r.holdMs as number) > 0);
+  const avgHoldMs = holds.length ? sum(holds, (r) => r.holdMs as number) / holds.length : null;
+
+  // per-ape leaderboard
+  const apeMap = new Map<string, PnlApeLine>();
+  for (const r of closedSorted) {
+    const label = r.watchedLabel || 'manual';
+    const line = apeMap.get(label) || { label, closed: 0, wins: 0, pnlLamports: 0 };
+    line.closed += 1;
+    if (pnlOf(r) > 0) line.wins += 1;
+    line.pnlLamports += pnlOf(r);
+    apeMap.set(label, line);
+  }
+  const byApe = [...apeMap.values()].sort((a, b) => b.pnlLamports - a.pnlLamports);
+
+  const weekAgo = now - 7 * 24 * 3600_000;
+  const last7Rows = closedSorted.filter((r) => (r.exitTime ?? r.entryTime) >= weekAgo);
+
+  // open positions: cost + live value where the caller priced them
+  const openCost = open.reduce((a, r) => a + Math.max(0, r.spentLamports || 0), 0);
+  let priced = 0;
+  let live = 0;
+  let pricedCost = 0;
+  let bookedFromPartials = 0;
+  for (const r of open) {
+    const v = opts.unrealizedByRow?.[r.id];
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue; // unpriced rows stay out of the estimate
+    priced += 1;
+    live += v;
+    pricedCost += Math.max(0, r.spentLamports || 0);
+    bookedFromPartials += (r.partialSells || []).reduce((a, s) => a + Math.max(0, s.quoteLamports || 0), 0);
+  }
+  const unrealized = priced > 0 ? live + bookedFromPartials - pricedCost : null;
+
+  return {
+    closed: closedSorted.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: closedSorted.length ? wins.length / closedSorted.length : 0,
+    realizedLamports: realized,
+    boughtLamports: bought,
+    soldLamports: sold,
+    returnPct: bought > 0 ? realized / bought : 0,
+    avgWinLamports: avgWin,
+    avgLossLamports: avgLoss,
+    avgWinMultiple,
+    best,
+    worst,
+    streak,
+    avgHoldMs,
+    byApe,
+    openCount: open.length,
+    openPriced: priced,
+    openCostLamports: openCost,
+    unrealizedLamports: unrealized,
+    last7: { closed: last7Rows.length, realizedLamports: last7Rows.reduce((a, r) => a + pnlOf(r), 0) },
+    firstTradeAt: rows.length ? Math.min(...rows.map((r) => r.entryTime)) : null,
+  };
+}
+
 export function summarizeTrades(rows: TradeRow[]): TradeHistorySummary {
   const closed = rows.filter((r) => r.status === 'closed');
   const wins = closed.filter((r) => (r.pnlLamports ?? 0) > 0);
